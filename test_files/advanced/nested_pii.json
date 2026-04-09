@@ -11,7 +11,7 @@
     },
     "employees": [
       {
-        "id": "EMP001",
+        "id": "REDACTED",
         "basic_info": {
           "name": "Alice Johnson",
           "department": "Engineering"
@@ -21,22 +21,22 @@
             "details": [
               {
                 "type": "email",
-                "value": "alice.j@company.com"
+                "value": "REDACTED"
               },
               {
                 "type": "ssn",
-                "value": "234-56-7890"
+                "value": "REDACTED"
               },
               {
                 "type": "phone",
-                "value": "(555) 234-5678"
+                "value": "REDACTED"
               }
             ]
           },
           "financial": {
             "bank_info": {
-              "routing": "021000089",
-              "account": "123456789012"
+              "routing": "REDACTED",
+              "account": "REDACTED"
             },
             "salary": {
               "annual": 125000,
@@ -47,12 +47,12 @@
         "emergency_contact": {
           "name": "Bob Johnson",
           "relationship": "spouse",
-          "phone": "555-345-6789",
-          "ssn": "345-67-8901"
+          "phone": "REDACTED",
+          "ssn": "REDACTED"
         }
       },
       {
-        "id": "EMP002",
+        "id": "REDACTED",
         "basic_info": {
           "name": "Carlos Martinez"
         },
@@ -61,7 +61,7 @@
             "details": [
               {
                 "type": "credit_card",
-                "value": "5555-4444-3333-2222",
+                "value": "REDACTED",
                 "note": "Corporate card for expenses"
               }
             ]
