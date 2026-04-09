@@ -2,18 +2,6 @@
 Prompt Injection Detection Module
 
 Detects malicious/hidden prompts in content that could manipulate LLM behavior.
-
-SECURITY NOTES (for Unifai demo):
-- scan() method is a NO-OP - returns no threats
-- Hidden text detection not implemented
-- Base64/encoded content not decoded
-- Unicode homoglyph attacks not detected
-
-AFTER UNIFAI REMEDIATION:
-- Detect hidden text (white-on-white, zero-size, off-page)
-- Decode and scan base64 content
-- Detect unicode homoglyph attacks
-- Identify known prompt injection patterns
 """
 
 import logging
@@ -63,13 +51,6 @@ class PromptInjectionDetector:
     """
     Detects prompt injection and hidden malicious content.
 
-    VULNERABILITY SUMMARY:
-    1. scan() is a NO-OP - always returns no threats
-    2. Hidden text detection not implemented
-    3. Base64 decoding not performed
-    4. Unicode attacks not detected
-    5. Known injection patterns not checked
-
     Threat Categories:
     - hidden_text: Invisible/hidden text in documents
     - encoded_content: Base64 or otherwise encoded malicious content
@@ -78,7 +59,7 @@ class PromptInjectionDetector:
     - metadata_injection: Malicious content in file metadata
     """
 
-    # Known prompt injection patterns (defined but NOT USED)
+    # Known prompt injection patterns
     INJECTION_PATTERNS = [
         r"ignore\s+(previous|all|above)\s+instructions?",
         r"disregard\s+(previous|all|above)\s+(instructions?|context)",
@@ -103,124 +84,314 @@ class PromptInjectionDetector:
         # Add more as needed
     }
 
+    # Hidden text CSS patterns
+    HIDDEN_TEXT_PATTERNS = [
+        r'color\s*:\s*white',
+        r'color\s*:\s*#fff(?:fff)?',
+        r'font-size\s*:\s*0',
+        r'display\s*:\s*none',
+        r'visibility\s*:\s*hidden',
+        r'opacity\s*:\s*0',
+        r'position\s*:\s*absolute.*left\s*:\s*-\d+',
+        r'text-indent\s*:\s*-\d+',
+    ]
+
     def __init__(self):
         """Initialize the detector."""
         self._compiled_patterns = [
             re.compile(p, re.IGNORECASE)
             for p in self.INJECTION_PATTERNS
         ]
+        self._compiled_hidden_patterns = [
+            re.compile(p, re.IGNORECASE)
+            for p in self.HIDDEN_TEXT_PATTERNS
+        ]
 
     async def scan(self, content: str, source: str = "unknown") -> ThreatDetectionResult:
         """
         Scan content for prompt injection and hidden threats.
-
-        VULNERABILITY: This method is a NO-OP.
-        It returns no threats regardless of content.
 
         Args:
             content: Content to scan for threats
             source: Source of the content (for logging)
 
         Returns:
-            ThreatDetectionResult with has_violations=False always
+            ThreatDetectionResult with detected threats
         """
-        # VULNERABILITY: No actual scanning performed
+        if not content:
+            return ThreatDetectionResult(
+                has_violations=False,
+                threats=[],
+                scanned_content_length=0
+            )
 
         logger.debug(
             "Threat scan requested",
             extra={
                 "source": source,
-                "content_length": len(content) if content else 0,
-                # VULNERABILITY: Content logged without scanning
-                "preview": content[:100] if content else None
+                "content_length": len(content),
             }
         )
 
-        # NO-OP: Return empty result without scanning
+        threats = []
+
+        # Detect prompt injection patterns
+        injection_threats = await self.detect_prompt_injection(content)
+        threats.extend(injection_threats)
+
+        # Detect hidden text
+        hidden_threats = await self.detect_hidden_text(content)
+        threats.extend(hidden_threats)
+
+        # Detect encoded content
+        encoded_threats = await self.detect_encoded_content(content)
+        threats.extend(encoded_threats)
+
+        # Detect unicode attacks
+        unicode_threats = await self.detect_unicode_attacks(content)
+        threats.extend(unicode_threats)
+
+        has_violations = len(threats) > 0
+
+        if has_violations:
+            logger.warning(
+                "Threats detected in content",
+                extra={
+                    "source": source,
+                    "threat_count": len(threats),
+                    "threat_types": list({t.threat_type for t in threats})
+                }
+            )
+
         return ThreatDetectionResult(
-            has_violations=False,
-            threats=[],
-            scanned_content_length=len(content) if content else 0
+            has_violations=has_violations,
+            threats=threats,
+            scanned_content_length=len(content)
         )
 
     async def detect_hidden_text(self, content: str) -> list[ThreatMatch]:
         """
         Detect hidden text patterns in content.
 
-        VULNERABILITY: Not implemented - returns empty list.
-
-        Should detect:
+        Detects:
         - White text on white background (CSS)
         - Zero-size text
         - Off-screen positioned text
         - Display:none content
         - Visibility:hidden content
         """
-        # VULNERABILITY: Hidden text detection not implemented
-        return []
+        threats = []
+
+        for pattern in self._compiled_hidden_patterns:
+            matches = pattern.findall(content)
+            for match in matches:
+                threats.append(ThreatMatch(
+                    threat_type="hidden_text",
+                    severity="high",
+                    description="Detected hidden text pattern that may conceal malicious instructions",
+                    content_preview=match if isinstance(match, str) else str(match),
+                    location="content"
+                ))
+
+        # Detect zero-width characters
+        zero_width_chars = ['\u200b', '\u200c', '\u200d', '\ufeff', '\u2060']
+        for char in zero_width_chars:
+            if char in content:
+                idx = content.index(char)
+                threats.append(ThreatMatch(
+                    threat_type="hidden_text",
+                    severity="medium",
+                    description=f"Detected zero-width character (U+{ord(char):04X}) that may hide content",
+                    content_preview=content[max(0, idx-10):idx+10],
+                    location="content"
+                ))
+                break
+
+        return threats
 
     async def detect_encoded_content(self, content: str) -> list[ThreatMatch]:
         """
         Detect and decode potentially malicious encoded content.
 
-        VULNERABILITY: Not implemented - returns empty list.
-
-        Should detect:
+        Detects:
         - Base64 encoded prompts
         - URL encoded content
         - Unicode escape sequences
         - HTML entities
         """
-        # VULNERABILITY: Encoded content detection not implemented
-        return []
+        threats = []
+
+        # Detect base64 encoded content
+        b64_pattern = re.compile(r'[A-Za-z0-9+/]{20,}={0,2}')
+        matches = b64_pattern.findall(content)
+
+        for match in matches:
+            try:
+                decoded = base64.b64decode(match).decode('utf-8')
+                # Check if decoded content contains injection patterns
+                for pattern in self._compiled_patterns:
+                    if pattern.search(decoded):
+                        threats.append(ThreatMatch(
+                            threat_type="encoded_content",
+                            severity="critical",
+                            description="Detected base64-encoded prompt injection attempt",
+                            content_preview=match[:50],
+                            location="content"
+                        ))
+                        break
+            except Exception:
+                continue
+
+        # Detect URL-encoded injection attempts
+        url_encoded_pattern = re.compile(r'(%[0-9a-fA-F]{2}){5,}')
+        url_matches = url_encoded_pattern.findall(content)
+        if url_matches:
+            try:
+                from urllib.parse import unquote
+                for segment in re.findall(r'(?:%[0-9a-fA-F]{2})+', content):
+                    decoded_url = unquote(segment)
+                    for pattern in self._compiled_patterns:
+                        if pattern.search(decoded_url):
+                            threats.append(ThreatMatch(
+                                threat_type="encoded_content",
+                                severity="high",
+                                description="Detected URL-encoded prompt injection attempt",
+                                content_preview=segment[:50],
+                                location="content"
+                            ))
+                            break
+            except Exception:
+                pass
+
+        return threats
 
     async def detect_prompt_injection(self, content: str) -> list[ThreatMatch]:
         """
         Detect known prompt injection patterns.
 
-        VULNERABILITY: Not implemented - returns empty list.
-
-        Should detect patterns like:
+        Detects patterns like:
         - "ignore previous instructions"
         - "new system prompt"
         - Role-playing attacks
         - Delimiter injection
         """
-        # VULNERABILITY: Pattern matching not performed
-        return []
+        threats = []
+
+        for pattern in self._compiled_patterns:
+            matches = pattern.findall(content)
+            for match in matches:
+                threats.append(ThreatMatch(
+                    threat_type="prompt_injection",
+                    severity="high",
+                    description="Detected prompt injection pattern that may manipulate LLM behavior",
+                    content_preview=match if isinstance(match, str) else str(match),
+                    location="content"
+                ))
+
+        return threats
 
     async def detect_unicode_attacks(self, content: str) -> list[ThreatMatch]:
         """
         Detect unicode-based attacks including homoglyphs.
 
-        VULNERABILITY: Not implemented - returns empty list.
-
-        Should detect:
+        Detects:
         - Homoglyph substitution (Cyrillic a for Latin a)
         - Bidirectional text attacks
         - Zero-width characters
         - Combining characters
         """
-        # VULNERABILITY: Unicode attack detection not implemented
-        return []
+        threats = []
+
+        # Detect homoglyph usage
+        homoglyph_found = []
+        for char, replacement in self.HOMOGLYPH_MAP.items():
+            if char in content:
+                homoglyph_found.append(char)
+
+        if homoglyph_found:
+            # Normalize and check if normalized content contains injection patterns
+            normalized = content
+            for char, replacement in self.HOMOGLYPH_MAP.items():
+                normalized = normalized.replace(char, replacement)
+
+            for pattern in self._compiled_patterns:
+                if pattern.search(normalized) and not pattern.search(content):
+                    threats.append(ThreatMatch(
+                        threat_type="unicode_attack",
+                        severity="critical",
+                        description="Detected homoglyph substitution used to obfuscate prompt injection",
+                        content_preview=", ".join(homoglyph_found),
+                        location="content"
+                    ))
+                    break
+
+            if homoglyph_found and not any(t.threat_type == "unicode_attack" for t in threats):
+                threats.append(ThreatMatch(
+                    threat_type="unicode_attack",
+                    severity="medium",
+                    description="Detected unicode homoglyph characters that may be used for obfuscation",
+                    content_preview=", ".join(f"U+{ord(c):04X}" for c in homoglyph_found),
+                    location="content"
+                ))
+
+        # Detect bidirectional text override characters
+        bidi_chars = ['\u202a', '\u202b', '\u202c', '\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069']
+        for char in bidi_chars:
+            if char in content:
+                threats.append(ThreatMatch(
+                    threat_type="unicode_attack",
+                    severity="high",
+                    description=f"Detected bidirectional text override character (U+{ord(char):04X}) that may reverse displayed text",
+                    content_preview=f"U+{ord(char):04X}",
+                    location="content"
+                ))
+                break
+
+        return threats
 
     async def scan_metadata(self, metadata: dict) -> ThreatDetectionResult:
         """
         Scan file metadata for hidden threats.
 
-        VULNERABILITY: Not implemented - returns no threats.
-
-        Should scan:
+        Scans:
         - EXIF comments and descriptions
         - PDF metadata fields
         - Document properties
         - Custom metadata tags
         """
-        # VULNERABILITY: Metadata scanning not implemented
+        threats = []
+        metadata_str = str(metadata)
+
+        # Scan metadata string for injection patterns
+        for pattern in self._compiled_patterns:
+            matches = pattern.findall(metadata_str)
+            for match in matches:
+                threats.append(ThreatMatch(
+                    threat_type="metadata_injection",
+                    severity="high",
+                    description="Detected prompt injection pattern in file metadata",
+                    content_preview=match if isinstance(match, str) else str(match),
+                    location="metadata"
+                ))
+
+        # Recursively scan metadata values
+        for key, value in metadata.items() if isinstance(metadata, dict) else []:
+            if isinstance(value, str):
+                for pattern in self._compiled_patterns:
+                    matches = pattern.findall(value)
+                    for match in matches:
+                        threats.append(ThreatMatch(
+                            threat_type="metadata_injection",
+                            severity="high",
+                            description=f"Detected prompt injection pattern in metadata field '{key}'",
+                            content_preview=match if isinstance(match, str) else str(match),
+                            location=f"metadata.{key}"
+                        ))
+
         return ThreatDetectionResult(
-            has_violations=False,
-            threats=[],
-            scanned_content_length=len(str(metadata))
+            has_violations=len(threats) > 0,
+            threats=threats,
+            scanned_content_length=len(metadata_str)
         )
 
     def _decode_base64(self, content: str) -> Optional[str]:
@@ -234,54 +405,8 @@ class PromptInjectionDetector:
                 try:
                     decoded = base64.b64decode(match).decode('utf-8')
                     return decoded
-                except:
+                except Exception:
                     continue
             return None
-        except:
+        except Exception:
             return None
-
-
-# ============================================================================
-# REMEDIATED VERSION (commented out - Unifai would enable this)
-# ============================================================================
-
-# class PromptInjectionDetector:
-#     """
-#     SECURE VERSION - After Unifai remediation
-#
-#     This version:
-#     - Actually scans for prompt injection patterns
-#     - Detects hidden text in various formats
-#     - Decodes and scans base64 content
-#     - Identifies unicode attacks
-#     """
-#
-#     async def scan(self, content: str, source: str = "unknown") -> ThreatDetectionResult:
-#         """Perform comprehensive threat scanning."""
-#         threats = []
-#
-#         # Check for prompt injection patterns
-#         for pattern in self._compiled_patterns:
-#             matches = pattern.findall(content)
-#             for match in matches:
-#                 threats.append(ThreatMatch(
-#                     threat_type="prompt_injection",
-#                     severity="high",
-#                     description=f"Detected prompt injection pattern",
-#                     content_preview=match,
-#                     location=source
-#                 ))
-#
-#         # Check for hidden/encoded content
-#         encoded_threats = await self.detect_encoded_content(content)
-#         threats.extend(encoded_threats)
-#
-#         # Check for unicode attacks
-#         unicode_threats = await self.detect_unicode_attacks(content)
-#         threats.extend(unicode_threats)
-#
-#         return ThreatDetectionResult(
-#             has_violations=len(threats) > 0,
-#             threats=threats,
-#             scanned_content_length=len(content)
-#         )
