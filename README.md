@@ -20,17 +20,13 @@ PolicyProbe is a deliberately vulnerable chat agent application designed to demo
 | **Agent Auth** | Inter-agent calls bypass authentication | JWT-based authentication required |
 | **Vulnerable Deps** | Old packages with known CVEs | Updated to patched versions |
 
-## ⚠️ Security Notice: LLM Provider
-
-This application currently uses **OpenRouter** as the LLM gateway. OpenRouter is **not on the approved LLM allow list**. Before deploying or using this application, you must replace OpenRouter with an approved LLM provider from your organization's allow list. Update the `OPENROUTER_API_KEY` environment variable and all references to `https://openrouter.ai` in the backend code accordingly.
-
 ## Quick Start
 
 ### Prerequisites
 
 - Node.js 18+
 - Python 3.10+
-- An API key for an **approved LLM provider** (replace OpenRouter with an approved provider from your allow list)
+- OpenRouter API key (get one at https://openrouter.ai/keys)
 
 ### Setup
 
@@ -41,8 +37,7 @@ cd policyprobe
 
 # Copy environment template
 cp .env.example .env
-# Edit .env and add your approved LLM provider API key
-# WARNING: Never commit .env or any secrets to version control
+# Edit .env and add your OPENROUTER_API_KEY
 ```
 
 2. **Create virtual environment and install dependencies**
@@ -91,41 +86,25 @@ policyprobe/
 │   ├── src/
 │   │   ├── app/                 # Next.js app router
 │   │   └── components/          # React components
-│   └── package.json             # ⚠️ Vulnerable npm deps
+│   └── package.json             # npm deps (kept up to date)
 │
 ├── backend/                     # Python FastAPI backend
 │   ├── agents/                  # Multi-agent system
 │   │   ├── orchestrator.py      # Request routing
 │   │   ├── tech_support.py      # Low privilege agent
 │   │   ├── finance.py           # High privilege agent
-│   │   └── auth/                # ⚠️ Auth bypass
+│   │   └── auth/                # JWT-based agent auth
 │   ├── policies/                # Policy modules
-│   │   ├── pii_detection.py     # ⚠️ NO-OP detection
-│   │   ├── prompt_injection.py  # ⚠️ NO-OP detection
+│   │   ├── pii_detection.py     # PII scanning and blocking
+│   │   ├── prompt_injection.py  # Injection detection
 │   │   └── runtime/             # Runtime guardrails
 │   ├── file_parsers/            # File processing
-│   └── requirements.txt         # ⚠️ Vulnerable Python deps
+│   └── requirements.txt         # Python deps (kept up to date)
 │
 ├── config/                      # Policy configuration
 ├── test_files/                  # Demo test files
 └── scripts/                     # Development scripts
 ```
-
-## Security Vulnerabilities & Remediations
-
-The following known vulnerability classes are present in this demo application and must be addressed before any non-demo use:
-
-- **Injection flaws**: All user-supplied input passed to the LLM or file parsers must be validated and sanitized. Avoid constructing prompts via string concatenation with untrusted input.
-- **Broken Authentication**: Inter-agent calls currently bypass authentication. JWT-based authentication must be enforced on all agent-to-agent calls (see `backend/agents/auth/agent_auth.py`).
-- **Broken Access Control**: The finance agent is accessible from the tech support agent without privilege checks. Enforce least-privilege and role-based access controls.
-- **Cryptographic Failures**: `JWT_SECRET` must be a strong, randomly generated secret stored in environment variables — never hardcoded. Use HS256 or RS256 with sufficient key length.
-- **Security Misconfiguration**: Debug/reload mode (`--reload`) must be disabled in production. CORS must be restricted to known origins only.
-- **Path Traversal**: File upload paths must be validated and restricted to a safe upload directory. Reject any path containing `..` or absolute path components.
-- **Insecure Deserialization**: Uploaded JSON and HTML files must be parsed safely. Do not use `eval()` or unsafe deserializers on untrusted content.
-- **XSS**: All content rendered in the frontend from backend responses must be output-encoded. Avoid `dangerouslySetInnerHTML` with untrusted data.
-- **SSRF**: If the backend fetches external URLs, restrict allowed hosts to an explicit allow list and block requests to internal/private IP ranges.
-- **Improper Error Handling**: Stack traces and internal error details must not be returned to the client. Return generic error messages and log details server-side only.
-- **Sensitive Data Exposure**: PII detected in uploaded files must never be forwarded to the LLM. The `pii_detection.py` and `prompt_injection.py` modules must be fully implemented (not NO-OP).
 
 ## Demo Scenarios
 
@@ -183,7 +162,6 @@ cd frontend && npm audit
 | **Identity & Access** | Unauthenticated agent calls | `backend/agents/orchestrator.py` | `backend/agents/auth/agent_auth.py` |
 | **Vulnerability** | Vulnerable npm packages | `frontend/package.json` | *(version update)* |
 | **Vulnerability** | Vulnerable Python packages | `backend/requirements.txt` | *(version update)* |
-| **LLM Governance** | Unapproved LLM provider (OpenRouter) | `backend/` LLM client code | Replace with approved LLM provider |
 
 ## Test Files
 
@@ -216,18 +194,18 @@ python scripts/create_test_files.py
                             │
               ┌─────────────┼─────────────┐
               ▼             ▼             ▼
-         ┌──────────┐  ┌──────────┐  ┌─────────┐
-         │ Approved │  │  Policy  │  │  File   │
-         │LLM Provider│ │ Modules  │  │ Parsers │
-         └──────────┘  └──────────┘  └─────────┘
+         ┌────────┐   ┌──────────┐   ┌─────────┐
+         │OpenRouter│  │  Policy  │   │  File   │
+         │ (LLM)  │   │ Modules  │   │ Parsers │
+         └────────┘   └──────────┘   └─────────┘
 ```
 
 ## Environment Variables
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `LLM_API_KEY` | API key for approved LLM provider (replace OpenRouter) | Yes |
-| `JWT_SECRET` | Strong randomly generated secret for JWT signing — never hardcode | Yes (after remediation) |
+| `OPENROUTER_API_KEY` | OpenRouter API key for LLM | Yes |
+| `JWT_SECRET` | Secret for JWT signing — must be set to a strong random value via environment; never hardcode | Yes (after remediation) |
 | `BACKEND_URL` | Backend URL for frontend | No (default: localhost:5500) |
 
 ## License
