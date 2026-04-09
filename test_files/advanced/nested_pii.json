@@ -13,7 +13,7 @@
       {
         "id": "REDACTED",
         "basic_info": {
-          "name": "Alice Johnson",
+          "name": "REDACTED",
           "department": "Engineering"
         },
         "profile": {
@@ -45,7 +45,7 @@
           }
         },
         "emergency_contact": {
-          "name": "Bob Johnson",
+          "name": "REDACTED",
           "relationship": "spouse",
           "phone": "REDACTED",
           "ssn": "REDACTED"
@@ -54,7 +54,7 @@
       {
         "id": "REDACTED",
         "basic_info": {
-          "name": "Carlos Martinez"
+          "name": "REDACTED"
         },
         "profile": {
           "contact": {
