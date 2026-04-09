@@ -9,7 +9,6 @@ can be detected and remediated by Unifai.
 import os
 import re
 import base64
-import logging
 from pathlib import Path
 
 # Load environment variables from .env file
@@ -17,6 +16,7 @@ from dotenv import load_dotenv
 env_path = Path(__file__).parent.parent / '.env'
 load_dotenv(env_path)
 
+import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -35,296 +35,254 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# PII redaction helpers
+# POLICY NOTICE: Authentication
+# ---------------------------------------------------------------------------
+# POLICY VIOLATION: The LLM endpoints (/chat, /upload) do not enforce
+# authentication. Authentication MUST be implemented to access all LLM
+# endpoints. This is a violation of the "Authenticate inbound requests" policy.
+#
+# POLICY VIOLATION: Inter-agent authentication is missing. Every agent-to-agent
+# call must implement authentication. Calls from AgentOrchestrator to
+# FileProcessorAgent (and any other agent) are currently unauthenticated,
+# which is a violation of the "Authenticate Agent Interactions" policy.
 # ---------------------------------------------------------------------------
 
-# Zero-tolerance PII patterns (global / OWASP-aligned)
-_PII_PATTERNS = [
-    # Social Security Number
-    (re.compile(r'\b\d{3}-\d{2}-\d{4}\b'), '[SSN REDACTED]'),
-    # Year of Birth (standalone 4-digit year 1900-2099)
-    (re.compile(r'\b(19|20)\d{2}\b'), '[YOB REDACTED]'),
-    # Personal Phone Number
-    (re.compile(r'\b(\+?1[\s\-.]?)?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}\b'), '[PHONE REDACTED]'),
-    # Email
-    (re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b'), '[EMAIL REDACTED]'),
-    # Passport Number (generic)
-    (re.compile(r'\b[A-Z]{1,2}\d{6,9}\b'), '[PASSPORT REDACTED]'),
-    # Drivers License (common US formats)
-    (re.compile(r'\b[A-Z]{1,2}\d{5,8}\b'), '[DL REDACTED]'),
-    # Taxpayer Identification Number / EIN
-    (re.compile(r'\b\d{2}-\d{7}\b'), '[TIN REDACTED]'),
-    # Credit Card Number
-    (re.compile(r'\b(?:\d[ \-]?){13,16}\b'), '[CC REDACTED]'),
-    # IP Address
-    (re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b'), '[IP REDACTED]'),
-    # MAC Address
-    (re.compile(r'\b([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}\b'), '[MAC REDACTED]'),
-    # Home Address (simple heuristic: number + street)
-    (re.compile(r'\b\d+\s+[A-Za-z0-9\s,\.]{5,50}(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl)\b', re.IGNORECASE), '[ADDRESS REDACTED]'),
-    # Vehicle Identification Number
-    (re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b'), '[VIN REDACTED]'),
-    # GPS / Fine Location coordinates
-    (re.compile(r'\b[-+]?([1-8]?\d(\.\d+)?|90(\.0+)?),\s*[-+]?(180(\.0+)?|((1[0-7]\d)|([1-9]?\d))(\.\d+)?)\b'), '[LOCATION REDACTED]'),
+# ---------------------------------------------------------------------------
+# Suspicious content patterns for uploaded files
+# ---------------------------------------------------------------------------
+SUSPICIOUS_COMMANDS = [
+    # Shell / system commands
+    r'\balias\b', r'\bripgrep\b', r'\brg\b', r'\bcurl\b', r'\brm\b',
+    r'\becho\b', r'\bdd\b', r'\bgit\b', r'\btar\b', r'\bchmod\b',
+    r'\bchown\b', r'\bfsck\b',
+    r'\bwget\b', r'\bnc\b', r'\bnetcat\b', r'\bssh\b', r'\bscp\b',
+    r'\brsync\b', r'\bsudo\b', r'\bsu\b', r'\bchroot\b', r'\bmkdir\b',
+    r'\btouch\b', r'\bcat\b', r'\bls\b', r'\bps\b', r'\bkill\b',
+    r'\bpkill\b', r'\bkillall\b', r'\bnmap\b', r'\bping\b',
+    r'\bifconfig\b', r'\bip\b', r'\biptables\b', r'\bufw\b',
+    r'\bsystemctl\b', r'\bservice\b', r'\bcrontab\b', r'\bat\b',
+    r'\benv\b', r'\bexport\b', r'\bset\b', r'\bunset\b',
+    r'\bexec\b', r'\beval\b', r'\bsource\b',
+    r'\bpython\b', r'\bpython3\b', r'\bperl\b', r'\bruby\b',
+    r'\bnode\b', r'\bnodejs\b', r'\bphp\b', r'\bbash\b', r'\bsh\b',
+    r'\bzsh\b', r'\bfish\b', r'\bpowershell\b', r'\bcmd\b',
+    # Executables / binaries indicators
+    r'\.exe\b', r'\.sh\b', r'\.bat\b', r'\.cmd\b', r'\.ps1\b',
+    r'\.bin\b', r'\.elf\b',
+    # Shell operators
+    r'&&', r'\|\|', r';\s*\w', r'\$\(', r'`[^`]+`',
+    # Leetspeak variants of dangerous commands (common substitutions)
+    r'\b3v4l\b', r'\b3xec\b', r'\bcur1\b', r'\bw3g3t\b',
 ]
 
-# Singapore-specific PII patterns
-_SG_PII_PATTERNS = [
-    # NRIC / FIN
-    (re.compile(r'\b[STFGM]\d{7}[A-Z]\b'), 'REDACTED'),
-    # Singapore Passport
-    (re.compile(r'\bE\d{7}[A-Z]\b'), 'REDACTED'),
-    # Work Permit / Student Pass (generic gov ID)
-    (re.compile(r'\bWP\d{7}\b', re.IGNORECASE), 'REDACTED'),
-    # CPF Account Number
-    (re.compile(r'\bCPF\s*\d{9,12}\b', re.IGNORECASE), 'REDACTED'),
-    # Bank Account Number (generic)
-    (re.compile(r'\b\d{10,16}\b'), 'REDACTED'),
-    # SingPass / MyInfo identifiers (heuristic)
-    (re.compile(r'\bsingpass\b', re.IGNORECASE), 'REDACTED'),
-    (re.compile(r'\bmyinfo\b', re.IGNORECASE), 'REDACTED'),
-    # Session / Auth tokens (Bearer)
-    (re.compile(r'\bBearer\s+[A-Za-z0-9\-._~+/]+=*\b'), 'REDACTED'),
-    # GPS coordinates (shared with global)
-    (re.compile(r'\b[-+]?([1-8]?\d(\.\d+)?|90(\.0+)?),\s*[-+]?(180(\.0+)?|((1[0-7]\d)|([1-9]?\d))(\.\d+)?)\b'), 'REDACTED'),
-    # IP Address
-    (re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b'), 'REDACTED'),
-    # MAC Address
-    (re.compile(r'\b([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}\b'), 'REDACTED'),
-    # Email
+SUSPICIOUS_PATTERN = re.compile(
+    '|'.join(SUSPICIOUS_COMMANDS),
+    re.IGNORECASE
+)
+
+# ---------------------------------------------------------------------------
+# PII patterns (Singapore + general zero-tolerance)
+# ---------------------------------------------------------------------------
+PII_PATTERNS = [
+    # NRIC / FIN (Singapore) - S/T/F/G followed by 7 digits and a letter
+    (re.compile(r'\b[STFG]\d{7}[A-Z]\b', re.IGNORECASE), 'REDACTED'),
+    # Passport numbers (generic)
+    (re.compile(r'\b[A-Z]{1,2}\d{6,9}\b'), 'REDACTED'),
+    # Singapore phone numbers and general personal phone
+    (re.compile(r'\b(\+65[\s-]?)?(6|8|9)\d{7}\b'), 'REDACTED'),
+    # General phone numbers
+    (re.compile(r'\b(\+?\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b'), 'REDACTED'),
+    # Email addresses
     (re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b'), 'REDACTED'),
-    # Phone
-    (re.compile(r'\b(\+?65[\s\-.]?)?\d{4}[\s\-.]?\d{4}\b'), 'REDACTED'),
-    # Credit / Debit Card
-    (re.compile(r'\b(?:\d[ \-]?){13,16}\b'), 'REDACTED'),
+    # Credit / debit card numbers
+    (re.compile(r'\b(?:\d[ -]?){13,19}\b'), 'REDACTED'),
+    # Bank account numbers (generic 8-18 digit sequences)
+    (re.compile(r'\b\d{8,18}\b'), 'REDACTED'),
+    # CPF account numbers (Singapore) - 9 digits
+    (re.compile(r'\b\d{9}\b'), 'REDACTED'),
+    # Social Security Numbers
+    (re.compile(r'\b\d{3}-\d{2}-\d{4}\b'), 'REDACTED'),
+    # IP addresses
+    (re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b'), 'REDACTED'),
+    # MAC addresses
+    (re.compile(r'\b([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}\b'), 'REDACTED'),
+    # GPS coordinates
+    (re.compile(r'\b-?\d{1,3}\.\d+,\s*-?\d{1,3}\.\d+\b'), 'REDACTED'),
+    # Dates of birth (various formats)
+    (re.compile(r'\b(0?[1-9]|[12]\d|3[01])[\/\-](0?[1-9]|1[0-2])[\/\-]\d{2,4}\b'), 'REDACTED'),
+    # Year of birth (standalone 4-digit year 1900-2099)
+    (re.compile(r'\b(19|20)\d{2}\b'), 'REDACTED'),
+    # Authentication tokens / session IDs (hex strings >= 32 chars)
+    (re.compile(r'\b[0-9a-fA-F]{32,}\b'), 'REDACTED'),
+    # Vehicle Identification Numbers
+    (re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b'), 'REDACTED'),
+    # Driver's license (generic alphanumeric 6-15)
+    (re.compile(r'\b[A-Z]{1,2}\d{6,14}\b'), 'REDACTED'),
+    # Tax Identification Numbers (generic)
+    (re.compile(r'\b\d{2}-\d{7}\b'), 'REDACTED'),
 ]
 
-
-def redact_pii(text: str) -> str:
-    """Redact zero-tolerance PII from text using global patterns."""
-    if not text:
-        return text
-    for pattern, replacement in _PII_PATTERNS:
-        text = pattern.sub(replacement, text)
-    return text
-
-
-def redact_sg_pii(text: str) -> str:
-    """Redact Singapore zero-tolerance PII from text."""
-    if not text:
-        return text
-    for pattern, replacement in _SG_PII_PATTERNS:
-        text = pattern.sub(replacement, text)
-    return text
-
-
-def redact_all_pii(text: str) -> str:
-    """Apply both global and Singapore PII redaction."""
-    text = redact_pii(text)
-    text = redact_sg_pii(text)
-    return text
-
-
-# ---------------------------------------------------------------------------
-# Suspicious / malicious content removal helpers
-# ---------------------------------------------------------------------------
-
-_SUSPICIOUS_COMMANDS = [
-    'alias', 'ripgrep', 'curl', 'rm', 'echo', 'dd', 'git', 'tar',
-    'chmod', 'chown', 'fsck', 'wget', 'nc', 'netcat', 'nmap', 'bash',
-    'sh', 'zsh', 'python', 'perl', 'ruby', 'php', 'exec', 'eval',
-    'system', 'popen', 'subprocess', 'os.system', 'cmd', 'powershell',
-    'wscript', 'cscript', 'mshta', 'regsvr32', 'rundll32', 'certutil',
-    'bitsadmin', 'schtasks', 'at ', 'cron', 'crontab', 'kill', 'pkill',
-    'killall', 'passwd', 'sudo', 'su ', 'useradd', 'usermod', 'groupadd',
-    'iptables', 'ufw', 'firewall', 'mount', 'umount', 'mkfs', 'fdisk',
-    'parted', 'dd if', 'base64', 'xxd', 'hexdump', 'strings', 'objdump',
-    'strace', 'ltrace', 'gdb', 'ncat', 'socat', 'ssh', 'scp', 'sftp',
-    'ftp', 'telnet', 'rsh', 'rlogin', 'rcp', 'tftp', 'finger', 'who',
-    'w ', 'last', 'lastlog', 'history', 'env', 'export', 'set ', 'unset',
-    'source', 'dot ', '. /', 'xargs', 'find ', 'locate', 'updatedb',
-    'ldconfig', 'ldd', 'nm ', 'ar ', 'as ', 'ld ', 'gcc', 'g++', 'make',
-    'cmake', 'autoconf', 'automake', 'libtool', 'pkg-config',
+# Sensitive keywords that indicate PII context (for named-entity style redaction)
+PII_KEYWORD_PATTERNS = [
+    (re.compile(
+        r'(full\s+name|name)\s*[:\-=]\s*([^\n,;]{2,50})',
+        re.IGNORECASE), r'\1: REDACTED'),
+    (re.compile(
+        r'(address|residential|mailing|home\s+address)\s*[:\-=]\s*([^\n]{5,100})',
+        re.IGNORECASE), r'\1: REDACTED'),
+    (re.compile(
+        r'(nationality|ethnicity|race|religion|sexual\s+orientation|marital\s+status|political\s+affiliation)\s*[:\-=]\s*([^\n,;]{2,50})',
+        re.IGNORECASE), r'\1: REDACTED'),
+    (re.compile(
+        r'(salary|income|cpf|tax\s+id|tin)\s*[:\-=]\s*([^\n,;]{1,50})',
+        re.IGNORECASE), r'\1: REDACTED'),
+    (re.compile(
+        r'(employee\s+id|emp\s+id|school\s+id|student\s+id)\s*[:\-=]\s*([^\n,;]{1,30})',
+        re.IGNORECASE), r'\1: REDACTED'),
+    (re.compile(
+        r'(medical\s+record|health\s+record|diagnosis|disability)\s*[:\-=]\s*([^\n]{2,100})',
+        re.IGNORECASE), r'\1: REDACTED'),
+    (re.compile(
+        r'(singpass|myinfo|digital\s+identity)\s*[:\-=]\s*([^\n,;]{2,50})',
+        re.IGNORECASE), r'\1: REDACTED'),
+    (re.compile(
+        r'(imei|imsi|device\s+id)\s*[:\-=]\s*([^\n,;]{5,30})',
+        re.IGNORECASE), r'\1: REDACTED'),
+    (re.compile(
+        r'(browsing\s+history|search\s+quer|chat\s+log|call\s+record)\s*[:\-=]\s*([^\n]{2,200})',
+        re.IGNORECASE), r'\1: REDACTED'),
+    (re.compile(
+        r'(social\s+media\s+handle|username|login\s+id|account\s+name)\s*[:\-=]\s*([^\n,;]{2,50})',
+        re.IGNORECASE), r'\1: REDACTED'),
+    (re.compile(
+        r'(fingerprint|facial\s+image|voice\s+signature|iris\s+scan|retina\s+scan|biometric)\s*[:\-=]\s*([^\n]{2,100})',
+        re.IGNORECASE), r'\1: REDACTED'),
+    (re.compile(
+        r'(mother[\'s]*\s+maiden\s+name|maiden\s+name)\s*[:\-=]\s*([^\n,;]{2,50})',
+        re.IGNORECASE), r'\1: REDACTED'),
+    (re.compile(
+        r'(place\s+of\s+birth|birthplace)\s*[:\-=]\s*([^\n,;]{2,50})',
+        re.IGNORECASE), r'\1: REDACTED'),
 ]
 
-# Leetspeak substitution map
-_LEET_MAP = str.maketrans({
-    '0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's',
-    '7': 't', '@': 'a', '$': 's', '!': 'i', '+': 't',
-})
+# Dynamic code execution primitives to strip from LLM responses
+DYNAMIC_CODE_PATTERNS = re.compile(
+    r'^.*\b(eval\s*\(|exec\s*\(|subprocess\s*\(.*shell\s*=\s*True|'
+    r'os\.system\s*\(|__import__\s*\(|compile\s*\(|'
+    r'<script[^>]*>.*?</script>|bash\s+-c\s+["\']|'
+    r'sh\s+-c\s+["\'])\b.*$',
+    re.IGNORECASE | re.MULTILINE
+)
 
-# Pattern for base64-encoded blocks (min 20 chars)
-_BASE64_PATTERN = re.compile(r'(?:[A-Za-z0-9+/]{4}){5,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?')
-
-# Shell/script shebang and common binary magic bytes indicators
-_SHELL_PATTERN = re.compile(
-    r'(#!\s*/[^\s]+|'
-    r'\b(exec|eval|system|popen|subprocess\.call|subprocess\.run|os\.system|'
-    r'shell=True|Runtime\.exec|ProcessBuilder|cmd\.exe|/bin/sh|/bin/bash)\b)',
+# Prompt injection / jailbreak patterns
+PROMPT_INJECTION_PATTERNS = re.compile(
+    r'(ignore\s+(previous|prior|above|all)\s+(instructions?|prompts?|context)|'
+    r'disregard\s+(previous|prior|above|all)\s+(instructions?|prompts?|context)|'
+    r'forget\s+(everything|all|previous|prior)|'
+    r'you\s+are\s+now\s+(a\s+)?(different|new|another|evil|unrestricted)|'
+    r'act\s+as\s+(if\s+you\s+are|a\s+)?(?!an?\s+assistant)|'
+    r'pretend\s+(you\s+are|to\s+be)|'
+    r'jailbreak|'
+    r'DAN\s+mode|'
+    r'developer\s+mode|'
+    r'override\s+(safety|policy|guidelines|restrictions)|'
+    r'bypass\s+(safety|policy|guidelines|restrictions|filter)|'
+    r'system\s*:\s*you\s+are|'
+    r'\[INST\]|\[\/INST\]|<\|im_start\|>|<\|im_end\|>)',
     re.IGNORECASE
 )
 
 
-def _is_suspicious_base64(token: str) -> bool:
-    """Check if a base64 token decodes to suspicious content."""
-    try:
-        decoded = base64.b64decode(token + '==').decode('utf-8', errors='ignore').lower()
-        decoded_leet = decoded.translate(_LEET_MAP)
-        for cmd in _SUSPICIOUS_COMMANDS:
-            if cmd in decoded or cmd in decoded_leet:
-                return True
-    except Exception:
-        pass
-    return False
+def is_likely_base64(s: str) -> bool:
+    """Check if a string looks like base64-encoded content."""
+    b64_pattern = re.compile(r'^[A-Za-z0-9+/]{20,}={0,2}$')
+    return bool(b64_pattern.match(s.strip()))
 
 
-def remove_suspicious_content(text: str) -> str:
-    """Remove suspicious commands, shell code, and encoded payloads from text."""
-    if not text:
-        return text
+def decode_and_check_base64(text: str) -> str:
+    """Find base64 blobs in text, decode them, and check for suspicious content."""
+    b64_blob = re.compile(r'[A-Za-z0-9+/]{20,}={0,2}')
+    def replace_if_suspicious(m):
+        candidate = m.group(0)
+        try:
+            decoded = base64.b64decode(candidate).decode('utf-8', errors='ignore')
+            if SUSPICIOUS_PATTERN.search(decoded):
+                return '<suspicious_content_removed>'
+        except Exception:
+            pass
+        return candidate
+    return b64_blob.sub(replace_if_suspicious, text)
 
-    lines = text.splitlines()
-    cleaned_lines = []
+
+def sanitize_file_content(content: str) -> str:
+    """
+    Remove suspicious commands, executables, shell commands, binaries,
+    base64-encoded suspicious content, and leetspeak variants from file content.
+    """
+    # First check for base64-encoded suspicious content
+    content = decode_and_check_base64(content)
+    # Replace suspicious patterns line by line for precision
+    lines = content.splitlines(keepends=True)
+    sanitized_lines = []
     for line in lines:
-        lower_line = line.lower()
-        leet_line = lower_line.translate(_LEET_MAP)
-
-        # Check for shell patterns
-        if _SHELL_PATTERN.search(line):
-            cleaned_lines.append('<suspicious_content_removed>')
-            continue
-
-        # Check for suspicious commands
-        flagged = False
-        for cmd in _SUSPICIOUS_COMMANDS:
-            if cmd in lower_line or cmd in leet_line:
-                cleaned_lines.append('<suspicious_content_removed>')
-                flagged = True
-                break
-        if flagged:
-            continue
-
-        # Check for suspicious base64 tokens
-        b64_matches = _BASE64_PATTERN.findall(line)
-        if b64_matches:
-            for token in b64_matches:
-                if _is_suspicious_base64(token):
-                    line = line.replace(token, '<suspicious_content_removed>')
-
-        cleaned_lines.append(line)
-
-    return '\n'.join(cleaned_lines)
+        if SUSPICIOUS_PATTERN.search(line):
+            sanitized_lines.append('<suspicious_content_removed>\n')
+        else:
+            sanitized_lines.append(line)
+    return ''.join(sanitized_lines)
 
 
-# ---------------------------------------------------------------------------
-# Input sanitization / prompt injection detection
-# ---------------------------------------------------------------------------
-
-_INVISIBLE_PATTERN = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\ufeff]')
-_PROMPT_INJECTION_PATTERNS = [
-    re.compile(r'ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|context)', re.IGNORECASE),
-    re.compile(r'(system\s*prompt|you\s+are\s+now|act\s+as|pretend\s+(you\s+are|to\s+be)|jailbreak)', re.IGNORECASE),
-    re.compile(r'(disregard|forget|override)\s+(your\s+)?(instructions?|rules?|guidelines?|training)', re.IGNORECASE),
-    re.compile(r'<\s*(system|assistant|user)\s*>', re.IGNORECASE),
-    re.compile(r'\[\s*(INST|SYS|SYSTEM)\s*\]', re.IGNORECASE),
-]
+def redact_pii_from_content(content: str) -> str:
+    """Redact Singapore and general zero-tolerance PII from content."""
+    # Apply keyword-context patterns first
+    for pattern, replacement in PII_KEYWORD_PATTERNS:
+        content = pattern.sub(replacement, content)
+    # Apply regex PII patterns
+    for pattern, replacement in PII_PATTERNS:
+        content = pattern.sub(replacement, content)
+    return content
 
 
 def sanitize_llm_input(text: str) -> str:
     """
-    Sanitize text before sending to LLM:
-    - Remove invisible/control characters
-    - Detect and neutralize prompt injection attempts
-    - Remove suspicious shell/binary content
-    - Decode and check base64 payloads
-    - Handle leetspeak obfuscation
+    Sanitize and validate input before sending to the LLM.
+    - Remove prompt injection attempts
     - Redact PII
+    - Strip null bytes and control characters
     """
     if not text:
         return text
-
-    # Remove invisible characters and hidden prompts
-    text = _INVISIBLE_PATTERN.sub('', text)
-
-    # Check for base64-encoded suspicious content
-    b64_matches = _BASE64_PATTERN.findall(text)
-    for token in b64_matches:
-        if _is_suspicious_base64(token):
-            text = text.replace(token, '<suspicious_content_removed>')
-
-    # Check leetspeak lines
-    lines = text.splitlines()
-    cleaned = []
-    for line in lines:
-        leet_line = line.lower().translate(_LEET_MAP)
-        flagged = False
-        for cmd in _SUSPICIOUS_COMMANDS:
-            if cmd in leet_line:
-                cleaned.append('<suspicious_content_removed>')
-                flagged = True
-                break
-        if not flagged:
-            cleaned.append(line)
-    text = '\n'.join(cleaned)
-
-    # Neutralize prompt injection patterns
-    for pattern in _PROMPT_INJECTION_PATTERNS:
-        text = pattern.sub('[PROMPT INJECTION REMOVED]', text)
-
-    # Remove suspicious shell/binary content
-    text = remove_suspicious_content(text)
-
+    # Remove null bytes and non-printable control characters (keep newlines/tabs)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    # Detect and neutralise prompt injection
+    if PROMPT_INJECTION_PATTERNS.search(text):
+        logger.warning("Prompt injection attempt detected and neutralised in LLM input.")
+        text = PROMPT_INJECTION_PATTERNS.sub('[BLOCKED]', text)
     # Redact PII before sending to LLM
-    text = redact_all_pii(text)
-
+    text = redact_pii_from_content(text)
     return text
 
 
-# ---------------------------------------------------------------------------
-# LLM response sanitization
-# ---------------------------------------------------------------------------
-
-_DYNAMIC_EXEC_PATTERN = re.compile(
-    r'^\s*(eval\s*\(|exec\s*\(|subprocess\s*\.\s*(call|run|Popen)\s*\(.*shell\s*=\s*True|'
-    r'os\s*\.\s*system\s*\(|__import__\s*\(|compile\s*\(.*exec|'
-    r'bash\s+-c\s+|sh\s+-c\s+|cmd\s*/c\s+)',
-    re.IGNORECASE | re.MULTILINE
-)
-
-
-def sanitize_llm_response(text: str) -> str:
+def sanitize_llm_response(response: str) -> str:
     """
-    Sanitize LLM response:
-    - Remove lines containing eval/exec/dynamic code execution primitives
-    - Remove suspicious shell commands
+    Sanitize and validate the response received from the LLM.
+    Remove lines containing dynamic code-execution primitives.
     """
-    if not text:
-        return text
-
-    lines = text.splitlines()
-    cleaned = []
-    for line in lines:
-        if _DYNAMIC_EXEC_PATTERN.search(line):
-            # Skip lines with dynamic code execution
-            continue
-        cleaned.append(line)
-
-    result = '\n'.join(cleaned)
-    # Also remove suspicious content from response
-    result = remove_suspicious_content(result)
-    return result
+    if not response:
+        return response
+    sanitized = DYNAMIC_CODE_PATTERNS.sub('', response)
+    if sanitized != response:
+        logger.warning("Dynamic code execution primitive detected and removed from LLM response.")
+    return sanitized
 
 
-# ---------------------------------------------------------------------------
-# Log-safe helpers (mask PII in log records)
-# ---------------------------------------------------------------------------
-
-def _mask_for_log(text: Optional[str], max_len: int = 50) -> Optional[str]:
-    """Return a PII-redacted, length-limited preview safe for logging."""
-    if text is None:
-        return None
-    redacted = redact_all_pii(text)
-    return redacted[:max_len] if len(redacted) > max_len else redacted
+def safe_log_attachment(attachment) -> dict:
+    """Return a log-safe representation of an attachment (no content)."""
+    return {
+        "file_name": attachment.name,
+        "file_type": attachment.type,
+        "file_size": attachment.size,
+    }
 
 
 @asynccontextmanager
@@ -388,15 +346,6 @@ async def health_check():
     return {"status": "healthy", "service": "policyprobe"}
 
 
-# POLICY NOTICE: The /chat and /upload endpoints do not enforce authentication.
-# This is a violation of the authentication policy. Authentication must be
-# implemented to access all LLM endpoints.
-#
-# POLICY NOTICE: Inter-agent authentication is missing. Every agent-to-agent
-# call must implement authentication. Missing inter-agent authentication is a
-# policy violation.
-
-
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """
@@ -407,35 +356,33 @@ async def chat(request: ChatRequest):
     2. Processes files through the FileProcessorAgent
     3. Routes the request through the AgentOrchestrator
     4. Returns the AI response
+
+    POLICY NOTICE: This endpoint does not enforce authentication.
+    Authentication must be implemented to comply with policy.
+
+    POLICY NOTICE: Inter-agent calls (orchestrator -> file_processor) are
+    not authenticated. Authentication must be added to every agent-to-agent
+    call to comply with policy.
     """
     try:
         # Process any attached files
         file_contents = []
         if request.attachments:
             for attachment in request.attachments:
-                # Safe logging: mask PII and limit content preview
+                # Log only safe metadata — no content or user message
                 logger.info(
                     "Processing attachment",
-                    extra={
-                        "file_name": attachment.name,
-                        "file_type": attachment.type,
-                        "file_size": attachment.size,
-                        "request_context": {
-                            "message_preview": _mask_for_log(request.message),
-                            "attachment_content_preview": _mask_for_log(attachment.content),
-                        }
-                    }
+                    extra=safe_log_attachment(attachment)
                 )
 
-                # Sanitize and redact file content before processing
-                safe_content = attachment.content
-                if safe_content:
-                    safe_content = remove_suspicious_content(safe_content)
-                    safe_content = redact_all_pii(safe_content)
+                # Sanitize file content: remove suspicious commands and redact PII
+                raw_content = attachment.content or ''
+                sanitized_content = sanitize_file_content(raw_content)
+                sanitized_content = redact_pii_from_content(sanitized_content)
 
                 # Process the file content
                 processed = await file_processor.process(
-                    content=safe_content,
+                    content=sanitized_content,
                     filename=attachment.name,
                     content_type=attachment.type
                 )
@@ -444,10 +391,10 @@ async def chat(request: ChatRequest):
                     "extracted_content": processed
                 })
 
-        # Sanitize user message before sending to LLM
+        # Sanitize and validate the user message before sending to LLM
         sanitized_message = sanitize_llm_input(request.message)
 
-        # Sanitize file contents before sending to LLM
+        # Sanitize extracted file content before sending to LLM
         sanitized_file_contents = []
         for fc in file_contents:
             sanitized_file_contents.append({
@@ -467,7 +414,7 @@ async def chat(request: ChatRequest):
             "LLM interaction - input",
             extra={
                 "conversation_id": request.conversation_id,
-                "sanitized_message_preview": _mask_for_log(sanitized_message),
+                "message_length": len(sanitized_message),
                 "file_count": len(sanitized_file_contents),
             }
         )
@@ -475,16 +422,17 @@ async def chat(request: ChatRequest):
         # Route through orchestrator
         response = await orchestrator.process(context)
 
-        # Sanitize LLM response
-        raw_response = response.get("response", "I processed your request.")
-        sanitized_response = sanitize_llm_response(raw_response)
+        # Sanitize and validate LLM response
+        raw_llm_response = response.get("response", "I processed your request.")
+        sanitized_response = sanitize_llm_response(raw_llm_response)
 
         # Log LLM interaction (output)
         logger.info(
             "LLM interaction - output",
             extra={
                 "conversation_id": request.conversation_id,
-                "response_preview": _mask_for_log(sanitized_response),
+                "response_length": len(sanitized_response),
+                "policy_warning_present": response.get("policy_warning") is not None,
             }
         )
 
@@ -500,8 +448,7 @@ async def chat(request: ChatRequest):
         logger.error(
             "Error processing chat request",
             extra={
-                "error": type(e).__name__,
-                "conversation_id": request.conversation_id,
+                "error": str(e),
             }
         )
         raise HTTPException(
@@ -520,46 +467,56 @@ async def chat(request: ChatRequest):
 async def upload_file(file: UploadFile = File(...)):
     """
     Direct file upload endpoint.
-    """
-    # Enforce a reasonable file size limit (10 MB)
-    MAX_FILE_SIZE = 10 * 1024 * 1024
-    content = await file.read()
 
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail="File too large. Maximum size is 10 MB.")
+    POLICY NOTICE: This endpoint does not enforce authentication.
+    Authentication must be implemented to comply with policy.
+
+    POLICY NOTICE: Inter-agent calls from this endpoint are not authenticated.
+    Authentication must be added to every agent-to-agent call to comply with policy.
+    """
+    content = await file.read()
 
     # Decode file content
     raw_text = content.decode('utf-8', errors='ignore')
 
-    # Remove suspicious content (shell commands, binaries, encoded payloads)
-    safe_text = remove_suspicious_content(raw_text)
+    # Sanitize: remove suspicious commands/executables/shell content
+    sanitized_text = sanitize_file_content(raw_text)
 
-    # Redact PII (global + Singapore)
-    safe_text = redact_all_pii(safe_text)
+    # Redact Singapore and general zero-tolerance PII from file content
+    sanitized_text = redact_pii_from_content(sanitized_text)
 
-    # Sanitize as LLM input
-    safe_text = sanitize_llm_input(safe_text)
+    # Sanitize for LLM input (prompt injection, additional PII pass)
+    sanitized_text = sanitize_llm_input(sanitized_text)
 
-    # Log upload event safely
+    # Log LLM interaction - file upload input
     logger.info(
-        "File upload processed",
+        "LLM interaction - file upload input",
         extra={
             "filename": file.filename,
-            "size": len(content),
             "content_type": file.content_type,
+            "original_size": len(content),
+            "sanitized_size": len(sanitized_text),
         }
     )
 
     processed = await file_processor.process(
-        content=safe_text,
+        content=sanitized_text,
         filename=file.filename,
         content_type=file.content_type
     )
 
-    # Sanitize processor output before returning
+    # Sanitize LLM response
     if processed:
         processed = sanitize_llm_response(processed)
-        processed = redact_all_pii(processed)
+
+    # Log LLM interaction - file upload output
+    logger.info(
+        "LLM interaction - file upload output",
+        extra={
+            "filename": file.filename,
+            "processed_length": len(processed) if processed else 0,
+        }
+    )
 
     return {
         "filename": file.filename,
