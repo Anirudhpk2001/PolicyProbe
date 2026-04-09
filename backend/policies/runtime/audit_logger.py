@@ -2,99 +2,37 @@
 Audit Logger
 
 Provides audit logging for security-relevant events.
-
-SECURITY NOTES (for Unifai demo):
-- Input validation and sanitization implemented
-- Secure audit trail with structured logging
-- Tamper-evident event storage
-- Compliance reporting support
 """
 
 import hashlib
 import hmac
 import json
 import logging
-import re
-from datetime import datetime, timezone
+import os
+from datetime import datetime
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-_VALID_SEVERITY_LEVELS = frozenset({"debug", "info", "warning", "error", "critical"})
-_VALID_EVENT_TYPE_PATTERN = re.compile(r'^[a-zA-Z0-9_\-\.]{1,128}$')
-_MAX_DETAIL_VALUE_LENGTH = 1024
-_MAX_DETAIL_KEYS = 50
-_MAX_USER_ID_LENGTH = 256
+_AUDIT_HMAC_KEY = os.environ.get("AUDIT_HMAC_KEY", os.urandom(32))
 
 
-def _sanitize_string(value: Any, max_length: int = 256) -> str:
-    """Sanitize a string value to prevent injection and truncate to max length."""
-    if value is None:
-        return ""
-    sanitized = str(value)
-    # Remove null bytes and control characters except standard whitespace
-    sanitized = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', sanitized)
-    # Truncate to max length
-    return sanitized[:max_length]
+def _compute_integrity_tag(event: dict) -> str:
+    """Compute an HMAC tag for an audit event to detect tampering."""
+    serialized = json.dumps(event, sort_keys=True, default=str).encode("utf-8")
+    key = _AUDIT_HMAC_KEY if isinstance(_AUDIT_HMAC_KEY, bytes) else _AUDIT_HMAC_KEY.encode("utf-8")
+    return hmac.new(key, serialized, hashlib.sha256).hexdigest()
 
 
-def _sanitize_dict(data: dict, depth: int = 0) -> dict:
-    """Recursively sanitize dictionary values to prevent injection attacks."""
-    if depth > 5:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    sanitized = {}
-    keys = list(data.keys())[:_MAX_DETAIL_KEYS]
-    for key in keys:
-        safe_key = _sanitize_string(key, 128)
-        value = data[key]
-        if isinstance(value, dict):
-            sanitized[safe_key] = _sanitize_dict(value, depth + 1)
-        elif isinstance(value, (list, tuple)):
-            sanitized[safe_key] = [
-                _sanitize_string(item, _MAX_DETAIL_VALUE_LENGTH)
-                if not isinstance(item, dict)
-                else _sanitize_dict(item, depth + 1)
-                for item in list(value)[:_MAX_DETAIL_KEYS]
-            ]
-        elif isinstance(value, (int, float, bool)):
-            sanitized[safe_key] = value
-        else:
-            sanitized[safe_key] = _sanitize_string(value, _MAX_DETAIL_VALUE_LENGTH)
-    return sanitized
-
-
-def _validate_event_type(event_type: str) -> str:
-    """Validate and sanitize event type string."""
-    if not isinstance(event_type, str):
-        raise ValueError("event_type must be a string")
-    sanitized = _sanitize_string(event_type, 128)
-    if not _VALID_EVENT_TYPE_PATTERN.match(sanitized):
-        raise ValueError(f"Invalid event_type format: {sanitized!r}")
-    return sanitized
-
-
-def _validate_severity(severity: str) -> str:
-    """Validate severity level."""
-    if not isinstance(severity, str):
-        return "info"
-    normalized = severity.lower().strip()
-    if normalized not in _VALID_SEVERITY_LEVELS:
-        return "info"
-    return normalized
-
-
-def _compute_event_integrity(event: dict) -> str:
-    """Compute an HMAC-based integrity hash for tamper-evidence."""
-    try:
-        serialized = json.dumps(event, sort_keys=True, default=str).encode("utf-8")
-        # Use a fixed key derived from a constant; in production this should be
-        # loaded from a secure secrets manager.
-        integrity_key = b"audit_integrity_key_replace_in_production"
-        return hmac.new(integrity_key, serialized, hashlib.sha256).hexdigest()
-    except Exception:
-        return ""
+def _sanitize_value(value: Any) -> Any:
+    """Recursively sanitize values to prevent log injection."""
+    if isinstance(value, str):
+        return value.replace("\n", "\\n").replace("\r", "\\r").replace("\x00", "")
+    if isinstance(value, dict):
+        return {_sanitize_value(k): _sanitize_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_value(i) for i in value]
+    return value
 
 
 class AuditLogger:
@@ -102,14 +40,14 @@ class AuditLogger:
     Audit logging for security events.
 
     Provides:
-    - Input validation and sanitization
-    - Tamper-evident audit trail via HMAC integrity hashes
-    - Structured logging for compliance
-    - Severity-based log routing
+    - Tamper-evident audit trail via HMAC integrity tags
+    - Log injection prevention
+    - Structured event logging
+    - Severity-based alerting hooks
     """
 
     def __init__(self):
-        self._events = []  # In-memory only - not persistent
+        self._events = []
 
     async def log_event(
         self,
@@ -119,35 +57,47 @@ class AuditLogger:
         severity: str = "info"
     ) -> None:
         """
-        Log a security-relevant event with input validation and sanitization.
+        Log a security-relevant event with tamper-evident integrity tag.
         """
-        # Validate and sanitize inputs
-        safe_event_type = _validate_event_type(event_type)
-        safe_severity = _validate_severity(severity)
-        safe_details = _sanitize_dict(details) if isinstance(details, dict) else {}
-        safe_user_id = _sanitize_string(user_id, _MAX_USER_ID_LENGTH) if user_id is not None else None
+        allowed_severities = {"debug", "info", "warning", "error", "critical"}
+        if severity not in allowed_severities:
+            severity = "info"
+
+        sanitized_event_type = _sanitize_value(event_type)
+        sanitized_details = _sanitize_value(details)
+        sanitized_user_id = _sanitize_value(user_id) if user_id is not None else None
 
         event = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "type": safe_event_type,
-            "details": safe_details,
-            "user_id": safe_user_id,
-            "severity": safe_severity
+            "timestamp": datetime.utcnow().isoformat(),
+            "type": sanitized_event_type,
+            "details": sanitized_details,
+            "user_id": sanitized_user_id,
+            "severity": severity
         }
 
-        # Compute integrity hash for tamper-evidence
-        event["integrity"] = _compute_event_integrity(
-            {k: v for k, v in event.items() if k != "integrity"}
-        )
+        integrity_tag = _compute_integrity_tag(event)
+        event["integrity_tag"] = integrity_tag
 
         self._events.append(event)
 
-        # Route to appropriate log level based on severity
-        log_fn = getattr(logger, safe_severity, logger.info)
+        log_fn = getattr(logger, severity, logger.info)
         log_fn(
             "Audit: %s",
-            safe_event_type,
-            extra={k: v for k, v in event.items() if k != "integrity"}
+            sanitized_event_type,
+            extra={k: v for k, v in event.items() if k != "integrity_tag"}
+        )
+
+        if severity in ("error", "critical"):
+            self._trigger_alert(event)
+
+    def _trigger_alert(self, event: dict) -> None:
+        """
+        Hook for high-severity alert integration.
+        Override or extend to integrate with alerting systems.
+        """
+        logger.critical(
+            "SECURITY ALERT: High-severity audit event detected: %s",
+            event.get("type", "unknown")
         )
 
     async def log_policy_violation(
@@ -156,16 +106,13 @@ class AuditLogger:
         violation_details: dict
     ) -> None:
         """
-        Log a policy violation with input validation.
+        Log a policy violation with warning severity.
         """
-        safe_policy_type = _sanitize_string(policy_type, 128)
-        safe_violation_details = _sanitize_dict(violation_details) if isinstance(violation_details, dict) else {}
-
         await self.log_event(
             event_type="policy_violation",
             details={
-                "policy": safe_policy_type,
-                **safe_violation_details
+                "policy": policy_type,
+                **violation_details
             },
             severity="warning"
         )
@@ -177,24 +124,29 @@ class AuditLogger:
         user_id: str
     ) -> None:
         """
-        Log data access for compliance with input validation.
+        Log data access for compliance.
         """
-        safe_resource = _sanitize_string(resource, 512)
-        safe_action = _sanitize_string(action, 128)
-        safe_user_id = _sanitize_string(user_id, _MAX_USER_ID_LENGTH)
-
         await self.log_event(
             event_type="data_access",
             details={
-                "resource": safe_resource,
-                "action": safe_action
+                "resource": resource,
+                "action": action
             },
-            user_id=safe_user_id
+            user_id=user_id
         )
 
     def get_recent_events(self, count: int = 100) -> list[dict]:
-        """Get recent audit events (for debugging only)."""
+        """Get recent audit events."""
         if not isinstance(count, int) or count < 1:
             count = 100
         count = min(count, 1000)
         return self._events[-count:]
+
+    def verify_event_integrity(self, event: dict) -> bool:
+        """Verify the integrity tag of a stored audit event."""
+        stored_tag = event.get("integrity_tag")
+        if not stored_tag:
+            return False
+        event_without_tag = {k: v for k, v in event.items() if k != "integrity_tag"}
+        expected_tag = _compute_integrity_tag(event_without_tag)
+        return hmac.compare_digest(stored_tag, expected_tag)
