@@ -93,10 +93,10 @@ policyprobe/
 │   │   ├── orchestrator.py      # Request routing
 │   │   ├── tech_support.py      # Low privilege agent
 │   │   ├── finance.py           # High privilege agent
-│   │   └── auth/                # JWT-based agent auth
+│   │   └── auth/                # JWT-based agent authentication
 │   ├── policies/                # Policy modules
 │   │   ├── pii_detection.py     # PII scanning and blocking
-│   │   ├── prompt_injection.py  # Injection detection
+│   │   ├── prompt_injection.py  # Injection detection and filtering
 │   │   └── runtime/             # Runtime guardrails
 │   ├── file_parsers/            # File processing
 │   └── requirements.txt         # Python deps (kept up to date)
@@ -205,8 +205,16 @@ python scripts/create_test_files.py
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `OPENROUTER_API_KEY` | OpenRouter API key for LLM | Yes |
-| `JWT_SECRET` | Secret for JWT signing — must be set to a strong random value via environment; never hardcode | Yes (after remediation) |
+| `JWT_SECRET` | Secret for JWT signing — must be set to a strong random value via environment variable; never hardcode | Yes (after remediation) |
 | `BACKEND_URL` | Backend URL for frontend | No (default: localhost:5500) |
+
+## Security Notes
+
+- Never commit `.env` files or secrets to version control
+- `JWT_SECRET` must be a cryptographically strong random value supplied via environment variable
+- All file uploads are validated and scanned for PII and prompt injection before processing
+- Inter-agent calls require valid JWT authentication
+- Dependencies are kept up to date to avoid known CVEs
 
 ## License
 
