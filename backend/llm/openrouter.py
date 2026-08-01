@@ -95,6 +95,17 @@ class OpenRouterClient:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
+                try:
+                    import asyncio as _gr_asyncio
+                    response = await _gr_asyncio.to_thread(gr_check, response, "api", "agent")
+                except Exception as _gr_exc:
+                    if type(_gr_exc).__name__ == "GRBlockedError":
+                        raise
+                    response = response
+                    import logging as _lineaje_logging
+                    _lineaje_logging.getLogger("lineaje.gr_client").warning(
+                        "Lineaje guardrail unavailable at 'api->agent' — passing data through unchecked"
+                    )
                     f"{self.BASE_URL}/chat/completions",
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
