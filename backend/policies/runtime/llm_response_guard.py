@@ -11,7 +11,7 @@ SECURITY NOTES (for Unifai demo):
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -22,13 +22,17 @@ class ValidationResult:
     """Result of response validation."""
     is_valid: bool
     violations: list[str]
+    explanation: list[str] = field(default_factory=list)
     filtered_response: Optional[str] = None
     original_response: Optional[str] = None
 
 
 class LLMResponseGuard:
+    __version__ = "1.0.0"  # Model version identifier
     """
     Guards LLM responses to ensure policy compliance.
+
+    Version: 1.0.0
 
     VULNERABILITY: All validation methods are NO-OPs.
     LLM responses pass through without any checking.
@@ -40,11 +44,13 @@ class LLMResponseGuard:
     - Compliance with content policies
     """
 
-    def __init__(self, risk_classification: str):
-        if not risk_classification:
-            raise ValueError("Risk classification level must be declared in configuration")
-        self.risk_classification = risk_classification
+    def __init__(self, risk_level: str):
+        allowed_levels = ['high', 'medium', 'low']
+        if risk_level not in allowed_levels:
+            raise ValueError(f"Invalid risk level: {risk_level}. Must be one of {allowed_levels}")
+        self.risk_level = risk_level
         self.validation_count = 0
+        self.covered_domain = covered_domain
 
     async def validate(self, response: str) -> ValidationResult:
         """
@@ -54,36 +60,42 @@ class LLMResponseGuard:
         """
         self.validation_count += 1
 
-        logger.debug(
+        logger.info(
             "Response validation requested",
             extra={
                 "response_length": len(response),
                 "validation_count": self.validation_count,
-                "model_version": self.model_version
+                "model_version": self.__version__,
+                "response_content": response
             }
         )
 
         # VULNERABILITY: No actual validation
-        # Detect code execution patterns
-        forbidden_patterns = ['eval(', 'exec(', 'subprocess', 'os.system', '`']
+        forbidden_patterns = ['eval(', 'exec(', 'import os', 'import subprocess', 'os.system', 'subprocess.run']
         violations = []
-        filtered = response
-        
         for pattern in forbidden_patterns:
-            if pattern in filtered:
+            if pattern in response:
                 violations.append(f"Detected code execution primitive: {pattern}")
-                filtered = filtered.replace(pattern, '[REDACTED]')
         
+        if violations:
+                    pii_violations = await self.check_pii_leakage(response)
+        bias_violations = await self.check_bias(response)
+        leakage_violations = await self.check_data_leakage(response)
+        all_violations = pii_violations + bias_violations + leakage_violations
+
         return ValidationResult(
-            is_valid=True,
-            violations=[],
-            filtered_response=f"[Disclosure: This is an AI-generated response.] {response}",
-            original_response=response
-        ) == 0,
-            violations=violations,
-            filtered_response=filtered,
+            is_valid=len(all_violations) == 0,
+            violations=all_violations,
+            filtered_response=response + '\n\n[Disclosure: All clinical recommendations must be reviewed and approved by a qualified human clinician before implementation.]',
             original_response=response
         )
+        else:
+            return ValidationResult(
+                is_valid=True,
+                violations=[],
+                filtered_response=response,
+                original_response=response
+            )
 
     async def check_pii_leakage(self, response: str) -> list[str]:
         """
