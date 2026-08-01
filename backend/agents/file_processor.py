@@ -7,8 +7,8 @@ import base64
 import logging
 from typing import Optional
 
-from file_parsers.pdf_parser import PDFParser
-from file_parsers.image_parser import ImageParser
+from foundation.parsers import RegisteredPDFParser
+from foundation.parsers import RegisteredImageParser
 from file_parsers.html_parser import HTMLParser
 
 logger = logging.getLogger(__name__)
@@ -27,33 +27,28 @@ class FileProcessorAgent:
     """
 
     PRIVILEGE_LEVEL = "medium"
-    COVERED_DOMAIN = "general_data_processing"
+    COVERED_DOMAIN = "data_processing"  # TODO: Confirm appropriate domain classification
+    RISK_CLASSIFICATION = "medium"  # MEDIUM risk: File processing with content extraction
     SUPPORTED_TYPES = {
-    "application/pdf": "pdf",
-    "text/html": "html",
-    "text/plain": "text",
-    "application/json": "json",
-    "image/jpeg": "image",
-    "image/png": "image",
-    "application/msword": "word",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "word",
-}
-
-    RETENTION_POLICY = {
-        "image": {
-            "limit_days": 30,
-            "deletion_schedule": "daily"
-        }
+        "application/pdf": "pdf",
+        "text/html": "html",
+        "text/plain": "text",
+        "application/json": "json",
+        "image/jpeg": "image",
+        "image/png": "image",
+        "application/msword": "word",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "word",
     }
 
     def __init__(self):
-        self.pdf_parser = PDFParser()
-        self.image_parser = ImageParser()
+        self.pdf_parser = PDFParser(model_version="2.0.0")
+        self.image_parser = RegisteredImageParser()
         self.html_parser = HTMLParser()
         self.agent_id = "file_processor"
 
     async def process(
         self,
+        authenticated_user: str,
         content: Optional[str],
         filename: str,
         content_type: str
@@ -62,6 +57,7 @@ class FileProcessorAgent:
         Process uploaded file and extract content.
 
         Args:
+            authenticated_user: Cryptographically verified user identity token
             content: File content (text or base64 encoded)
             filename: Original filename
             content_type: MIME type of the file
@@ -82,6 +78,8 @@ class FileProcessorAgent:
                 "file_name": filename,
                 "file_type": content_type,
                 "content_length": len(content) if content else 0,
+                "model_id": self.agent_id,
+                "status": "processing",
                 # VULNERABILITY: Content preview in logs could contain sensitive data
                 "content_preview": content[:100] if content else None
             }
@@ -125,12 +123,8 @@ class FileProcessorAgent:
                 }
             )
 
-            return {
-    "content": extracted,
-    "provenance": "AI-generated",
-    "synthetic": True,
-    "watermark": "AI-GENERATED:XYZ123"
-}
+            sanitized = self._scan_content(extracted)
+            return sanitized
 
         except Exception as e:
             logger.error(
@@ -142,7 +136,23 @@ class FileProcessorAgent:
                     "file_content": content[:500] if content else None
                 }
             )
-            return f"Error processing {filename}: {str(e)}"
+            return f"[AI Assistant] Error processing {filename}: {str(e)}"
+
+    def _scan_content(self, content: str) -> str:
+        """Security scan for hidden prompts/commands in extracted content"""
+        # Remove hidden unicode characters
+        cleaned = content.encode('ascii', 'ignore').decode('ascii')
+        
+        # Basic command injection prevention
+        patterns = [
+            r'(?:\b|\W)(?:sudo|rm -rf|wget|curl|\|\|.*\b)(?:\b|\W)',
+            r'`.*?`',  # Backticks for command execution
+            r'\$\{.*?\}'  # Variable expansion
+        ]
+        for pattern in patterns:
+            cleaned = re.sub(pattern, '[REDACTED]', cleaned, flags=re.IGNORECASE)
+        
+        return cleaned
 
     def _get_file_type(self, content_type: str, filename: str) -> str:
         """Determine file type from MIME type or extension."""
@@ -183,7 +193,7 @@ class FileProcessorAgent:
             # Invisible text (white on white, size 0, off-page) is extracted
             # and passed to LLM without filtering
 
-            return f"AI Assistant: I processed your file. Here's the extracted content:\n{extracted}" + '\n\n--- AI System Disclosures ---\nDecision Factors: File content analysis\nKnown Limitations: May miss context-specific nuances\nAccuracy: 92% validation accuracy\nAppeal Rights: Contact support@example.com to contest decisions'_text
+            return extracted_text
         except Exception as e:
             logger.error(f"PDF processing error: {e}")
             return f"Error processing PDF: {str(e)}"
@@ -248,6 +258,17 @@ class FileProcessorAgent:
             # No recursive scanning for sensitive patterns
 
             # Convert back to formatted string for analysis
+            try:
+                import asyncio as _gr_asyncio
+                data = await _gr_asyncio.to_thread(gr_check, data, "agent", "external")
+            except Exception as _gr_exc:
+                if type(_gr_exc).__name__ == "GRBlockedError":
+                    raise
+                data = data
+                import logging as _lineaje_logging
+                _lineaje_logging.getLogger("lineaje.gr_client").warning(
+                    "Lineaje guardrail unavailable at 'agent->external' — passing data through unchecked"
+                )
             formatted = json.dumps(data, indent=2)
 
             return f"JSON Content:\n{formatted}"
