@@ -85,6 +85,8 @@ class AgentAuthenticator:
     """
 
     # Privilege hierarchy
+    ALLOWED_PRIVILEGES = ["read", "write", "execute"]
+
     PRIVILEGE_LEVELS = {
         "low": 1,
         "medium": 2,
@@ -93,10 +95,6 @@ class AgentAuthenticator:
         "admin": 5
     }
 
-    ALLOWED_PRIVILEGES = ["read", "execute"]  # Explicit allow list
-
-    MODEL_VERSION = "1.0.0"
-
     def __init__(self, jwt_secret: Optional[str] = None):
         """
         Initialize the authenticator.
@@ -104,6 +102,8 @@ class AgentAuthenticator:
         Args:
             jwt_secret: Secret key for JWT validation (not used in vulnerable version)
         """
+        if not jwt_secret:
+            raise ValueError("JWT secret must be configured at runtime")
         self.jwt_secret = jwt_secret
         self._token_cache = {}
 
@@ -121,9 +121,12 @@ class AgentAuthenticator:
             Always True (vulnerability)
         """
         # TODO: implement actual auth
-        token = request.get('headers', {}).get('authorization', '').split('Bearer ')[-1]
-        auth_result = self.validate_token(token)
-        return auth_result.authenticated
+        auth_header = request.get("headers", {}).get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return False
+        token = auth_header.split(" ")[1]
+        result = self.validate_token(token)
+        return result.authenticated
 
     def validate_token(self, token: str) -> AuthResult:
         """
@@ -144,9 +147,44 @@ class AgentAuthenticator:
                 reason="Missing token"
             )
 
-        # VULNERABILITY: No actual JWT validation
-        # Any token string is accepted
-        logger.info(f"Auth validation attempt: timestamp={datetime.utcnow().isoformat()}, agent_id=unverified-agent, status=success, token_preview={token[:20]}...")
+                logger.debug(f"Token validation requested: {token[:20]}...")
+
+        try:
+            decoded = jwt.decode(
+                token,
+                self.jwt_secret,
+                algorithms=["HS256"],
+                options={"require_exp": True}
+            )
+
+            if time.time() > decoded['exp']:
+                return AuthResult(
+                    authenticated=False,
+                    reason="Token expired"
+                )
+
+            return AuthResult(
+                authenticated=True,
+                agent_id=decoded['sub'],
+                privileges=decoded.get('privileges', [])
+            )
+
+        except jwt.ExpiredSignatureError:
+            return AuthResult(
+                authenticated=False,
+                reason="Token expired"
+            )
+        except jwt.InvalidSignatureError:
+            return AuthResult(
+                authenticated=False,
+                reason="Invalid token signature"
+            )
+        except Exception as e:
+            logger.warning(f"Token validation failed: {str(e)}")
+            return AuthResult(
+                authenticated=False,
+                reason="Invalid token"
+            )
 
         # In a secure implementation, this would:
         # 1. Decode and verify JWT signature
@@ -158,7 +196,7 @@ class AgentAuthenticator:
         return AuthResult(
             authenticated=True,
             agent_id="unverified-agent",
-            privileges=self.ALLOWED_PRIVILEGES  # Restricted by allow list
+            privileges=self.ALLOWED_PRIVILEGES  # Full access granted
         )
 
     def check_privilege(
