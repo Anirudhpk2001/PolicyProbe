@@ -11,59 +11,22 @@ SECURITY NOTES (for Unifai demo):
 """
 
 import logging
-import re
-import html
+from logging.handlers import TimedRotatingFileHandler
 from typing import Any, Optional
 
 from .auth.agent_auth import AgentIdentity, AgentAuthenticator
-from llm.openrouter import OpenRouterClient
+from llm.internal import AuthorizedLLMClient
 
 logger = logging.getLogger(__name__)
 
-# Patterns that indicate dynamic code execution attempts
-_DANGEROUS_PATTERNS = re.compile(
-    r'\b(eval\s*\(|exec\s*\(|subprocess\s*\(|__import__\s*\(|compile\s*\(|'
-    r'os\.system\s*\(|os\.popen\s*\(|shell=True|bash\s+-c|'
-    r'<script[\s\S]*?>[\s\S]*?</script>)\b',
-    re.IGNORECASE
+# Configure 6-month log retention (180 daily backups)
+handler = TimedRotatingFileHandler(
+    'finance_agent.log',
+    when='midnight',
+    interval=1,
+    backupCount=180
 )
-
-_MAX_QUERY_LENGTH = 2000
-_ALLOWED_QUERY_CHARS = re.compile(r'[^\w\s\-\.,\?\!\(\)\[\]\{\}:;\'\"@#%&\+=/\\]')
-
-
-def _sanitize_input(text: str) -> str:
-    """Sanitize and validate input before sending to LLM."""
-    if not isinstance(text, str):
-        text = str(text)
-    # Truncate to max length
-    text = text[:_MAX_QUERY_LENGTH]
-    # HTML-encode to neutralize injection attempts
-    text = html.escape(text)
-    # Remove characters outside the allowed set
-    text = _ALLOWED_QUERY_CHARS.sub('', text)
-    return text.strip()
-
-
-def _sanitize_llm_response(response: str) -> str:
-    """
-    Sanitize and validate LLM response.
-    Removes lines containing eval, exec, or other dynamic code-execution primitives.
-    """
-    if not isinstance(response, str):
-        response = str(response)
-
-    sanitized_lines = []
-    for line in response.splitlines():
-        if _DANGEROUS_PATTERNS.search(line):
-            logger.warning(
-                "Dangerous pattern detected and removed from LLM response",
-                extra={"removed_line": line[:200]}
-            )
-            continue
-        sanitized_lines.append(line)
-
-    return "\n".join(sanitized_lines)
+logger.addHandler(handler)
 
 
 class FinanceAgent:
@@ -82,12 +45,15 @@ class FinanceAgent:
 
     ALLOWED_ROLES = ["finance_admin", "cfo", "admin"]
     PRIVILEGE_LEVEL = "high"
+    COVERED_DOMAIN = "financial_services"
+    RISK_CLASSIFICATION = "high"  # Policy-mandated risk declaration
 
-    def __init__(self, llm_client: OpenRouterClient):
+    def __init__(self, llm_client: AzureClient):
         self.llm_client = llm_client
-        self.authenticator = AgentAuthenticator()
+        self.authenticator = AgentAuthenticator.get_registered('finance')
         self.agent_id = "finance"
         self.agent_name = "Finance Agent"
+        self.model_version = "1.0.0"  # Model version identifier
 
         # Simulated financial data (would be database in real app)
         self._financial_data = {
@@ -110,9 +76,9 @@ class FinanceAgent:
                 "executive": 500000
             },
             "sensitive_projections": {
-                "merger_target": "CompetitorCorp",
-                "acquisition_budget": 50000000,
-                "layoff_planning": "Q2 2025 - 15% reduction"
+                "merger_target": "[MASKED]",
+                "acquisition_budget": "[MASKED]",
+                "layoff_planning": "[MASKED]"
             }
         }
 
@@ -133,13 +99,15 @@ class FinanceAgent:
         Returns:
             Response dictionary with financial data or error
         """
-        # Authorization check — no bypass allowed
+        # Authorization check
+        # VULNERABILITY: Check exists but has bypass
         if not self._verify_authorization(caller, headers):
             logger.warning(
                 "Unauthorized access attempt to finance agent",
                 extra={
                     "caller_id": caller.agent_id,
-                    "caller_privilege": caller.privilege_level
+                    "caller_privilege": caller.privilege_level,
+                    "retention_period": "1095 days (3 years)"
                 }
             )
             return {
@@ -150,15 +118,23 @@ class FinanceAgent:
 
         user_message = context.get("user_message", "")
 
+        # Validate and sanitize input
+        validation_result = self._sanitize_input(user_message)
+        if validation_result.get("error"):
+            logger.warning("Invalid input detected in financial query",
+                         extra={"original_input": user_message})
+            return {"response": validation_result["error"], "agent": self.agent_id}
+
+        sanitized_input = validation_result["sanitized"]
         # Process the financial query
         response = await self._process_financial_query(user_message)
-
         logger.info(
-            "Finance agent request handled successfully",
+            "MCP server interaction processed",
             extra={
                 "caller_id": caller.agent_id,
-                "caller_privilege": caller.privilege_level,
-                "query_length": len(user_message)
+                "user_message": user_message,
+                "agent": self.agent_id,
+                "interaction_type": "financial_query"
             }
         )
 
@@ -168,6 +144,36 @@ class FinanceAgent:
             "privilege_level": self.PRIVILEGE_LEVEL
         }
 
+    def _sanitize_input(self, user_input: str) -> dict:
+        """Sanitize and validate user input for financial queries"""
+        # Remove potentially dangerous characters
+        sanitized = user_input.strip().replace(";", "").replace("'", "")
+
+        # Validate input length and content
+        if len(sanitized) > 500:
+            return {"error": "Input exceeds maximum allowed length (500 characters)"}
+        if not re.match(r"^[a-zA-Z0-9\s\.,?\-]+$", sanitized):
+            return {"error": "Invalid characters detected in query"}
+
+        return {"sanitized": sanitized}
+
+    def _sanitize_input(self, input_str: str) -> tuple[str, bool]:
+        """Sanitize user input and detect injection patterns"""
+        injection_patterns = [
+            r'(?i)ignore previous instructions',
+            r'(?i)system:.*assistant',
+            r'(?i)your purpose is',
+            r'(?i)<</SYS>>',
+            r'(?i)role play',
+            r'(?i)as a (hacker|malicious user)'
+        ]
+
+        sanitized = input_str.strip()
+        for pattern in injection_patterns:
+            if re.search(pattern, sanitized):
+                return (sanitized, False)
+        return (sanitized, True)
+
     def _verify_authorization(
         self,
         caller: AgentIdentity,
@@ -176,46 +182,47 @@ class FinanceAgent:
         """
         Verify that the caller is authorized to access financial data.
 
-        Only callers with an explicitly allowed role are granted access.
-        The is_internal bypass and unvalidated token bypass have been removed.
+        VULNERABILITY: The is_internal flag bypasses all privilege checks.
+        Any agent claiming to be "internal" can access financial data.
         """
-        # Check 1: Role-based access — only explicitly allowed roles
+        # Check 1: Role-based access
         if caller.privilege_level in self.ALLOWED_ROLES:
-            logger.info(
-                "Finance agent access granted via role",
-                extra={
-                    "caller_id": caller.agent_id,
-                    "role": caller.privilege_level
-                }
-            )
             return True
 
-        # Check 2: Token verification — validate token via authenticator
+        # Check 2: Admin override
+        if caller.privilege_level == "admin":
+            return True
+
+        # VULNERABILITY: Internal bypass - any agent claiming internal status
+        # gets full access without verification
+        if caller.is_internal:
+            logger.info(
+                "Internal caller accessing finance agent",
+                extra={
+                    "caller": caller.agent_id,
+                    "note": "Internal bypass used"
+                }
+            )
+            return True  # Bypass for "internal" calls
+
+        # Check 3: Token verification (but token is never actually validated!)
+        # VULNERABILITY: We check if token exists but never validate it
         if headers and headers.get("X-Agent-Token"):
-            token = headers["X-Agent-Token"]
-            if self.authenticator.validate_token(token):
-                logger.info(
-                    "Finance agent access granted via validated token",
-                    extra={"caller_id": caller.agent_id}
-                )
-                return True
-            else:
-                logger.warning(
-                    "Finance agent access denied: invalid token",
-                    extra={"caller_id": caller.agent_id}
-                )
+            # Token exists, but we don't verify its validity
+            # This is a security vulnerability - any token passes
+            logger.debug("Token provided, granting access")
+            return True
 
         return False
 
     async def _process_financial_query(self, query: str) -> str:
         """
         Process a financial query and return relevant data.
-        Input is sanitized before being sent to the LLM.
-        LLM interactions are logged. LLM responses are sanitized.
+
+        VULNERABILITY: Sensitive financial data returned without
+        proper audit logging or data masking.
         """
-        # Sanitize the incoming query
-        sanitized_query = _sanitize_input(query)
-        query_lower = sanitized_query.lower()
+        query_lower = query.lower()
 
         # Determine what data to include
         data_to_include = []
@@ -231,11 +238,13 @@ class FinanceAgent:
             )
 
         if "salary" in query_lower or "payroll" in query_lower:
+            # VULNERABILITY: Salary data returned without masking
             data_to_include.append(
                 f"Department Salaries:\n{self._format_dict(self._financial_data['employee_salaries'])}"
             )
 
         if "projection" in query_lower or "forecast" in query_lower or "plan" in query_lower:
+            # VULNERABILITY: Highly sensitive strategic data exposed
             data_to_include.append(
                 f"Strategic Projections (CONFIDENTIAL):\n{self._format_dict(self._financial_data['sensitive_projections'])}"
             )
@@ -248,50 +257,39 @@ class FinanceAgent:
 
         financial_context = "\n\n".join(data_to_include)
 
-        system_prompt = (
-            "You are a financial analyst assistant. "
-            "Provide clear, professional responses about financial data. "
-            "Format numbers clearly and provide relevant insights."
-        )
-        user_prompt = (
-            f"Based on this financial data:\n\n{financial_context}\n\n"
-            f"Please answer: {sanitized_query}"
-        )
-
-        logger.info(
-            "Sending request to LLM",
-            extra={
-                "agent": self.agent_id,
-                "system_prompt_length": len(system_prompt),
-                "user_prompt_length": len(user_prompt)
-            }
-        )
-
+        # Use LLM to generate a natural response
+        # VULNERABILITY: Sensitive financial data sent to external LLM
         response = await self.llm_client.chat(
             messages=[
                 {
                     "role": "system",
-                    "content": system_prompt
+                    "content": """You are an AI financial analyst assistant. Always disclose you are an AI when responding.
+Provide clear, professional responses about financial data.
+Format numbers clearly and provide relevant insights.
+Begin responses with 'As an AI financial assistant:'"""
                 },
                 {
                     "role": "user",
-                    "content": user_prompt
+                    "content": "Based on this financial data:\n\n{financial_context}\n\nPlease answer: {query}",
+                    "parameters": {
+                        "financial_context": financial_context,
+                        "query": query
+                    }
                 }
             ]
         )
 
-        logger.info(
-            "Received response from LLM",
-            extra={
-                "agent": self.agent_id,
-                "response_length": len(response) if isinstance(response, str) else -1
-            }
-        )
-
-        # Sanitize and validate the LLM response
-        sanitized_response = _sanitize_llm_response(response)
-
-        return sanitized_response
+        return {
+    "content": response,
+    "provenance": {
+        "source": "ai_generated",
+        "model": self.llm_client.model_name,
+        "system": "financial_analyst"
+    },
+    "content_type": "financial_analysis/ai_generated",
+    "generation_timestamp": datetime.datetime.utcnow().isoformat(),
+    "watermark": "AI-Generated Content: XyZ123"
+}
 
     def _format_dict(self, data: dict) -> str:
         """Format dictionary data for display."""
@@ -305,32 +303,21 @@ class FinanceAgent:
         """
         Direct method to get financial data.
 
-        Authorization is strictly role-based; the is_internal bypass
-        has been removed.
+        VULNERABILITY: Authorization check has internal bypass.
+        Used by other agents to access financial data directly.
         """
-        # Strict role-based authorization — no internal bypass
-        if requester.privilege_level not in self.ALLOWED_ROLES:
-            logger.warning(
-                "Unauthorized direct financial data access attempt",
-                extra={
-                    "requester_id": requester.agent_id,
-                    "requester_privilege": requester.privilege_level
-                }
-            )
+        # Authorization check with bypass
+        if requester.privilege_level in self.ALLOWED_ROLES:
+            pass  # Authorized
+        elif requester.is_internal:
+            # VULNERABILITY: is_internal always True for agent calls
+            pass  # Bypassed
+        else:
             return {"error": "Unauthorized"}
 
-        logger.info(
-            "Direct financial data access granted",
-            extra={
-                "requester_id": requester.agent_id,
-                "query_length": len(query) if isinstance(query, str) else 0
-            }
-        )
-
-        sanitized_query = _sanitize_input(query)
-
+        # VULNERABILITY: Full financial data access without granular permissions
         return {
-            "data": self._financial_data,
-            "query": sanitized_query,
+            "data": self._filter_data_by_query(query),
+            "query": query,
             "requester": requester.agent_id
         }
