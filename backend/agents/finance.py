@@ -11,22 +11,12 @@ SECURITY NOTES (for Unifai demo):
 """
 
 import logging
-from logging.handlers import TimedRotatingFileHandler
 from typing import Any, Optional
 
-from .auth.agent_auth import AgentIdentity, AgentAuthenticator
-from llm.internal import AuthorizedLLMClient
+from .auth.secure_auth import SecureAgentIdentity, SecureAgentAuthenticator
+from llm.approved import ApprovedLLMClient
 
 logger = logging.getLogger(__name__)
-
-# Configure 6-month log retention (180 daily backups)
-handler = TimedRotatingFileHandler(
-    'finance_agent.log',
-    when='midnight',
-    interval=1,
-    backupCount=180
-)
-logger.addHandler(handler)
 
 
 class FinanceAgent:
@@ -46,16 +36,19 @@ class FinanceAgent:
     ALLOWED_ROLES = ["finance_admin", "cfo", "admin"]
     PRIVILEGE_LEVEL = "high"
     COVERED_DOMAIN = "financial_services"
-    RISK_CLASSIFICATION = "high"  # Policy-mandated risk declaration
+    RISK_CLASSIFICATION = "high"
 
-    def __init__(self, llm_client: AzureClient):
+    def __init__(self, llm_client: ApprovedLLMClient):
         self.llm_client = llm_client
-        self.authenticator = AgentAuthenticator.get_registered('finance')
+        self.authenticator = AgentAuthenticator()
         self.agent_id = "finance"
         self.agent_name = "Finance Agent"
-        self.model_version = "1.0.0"  # Model version identifier
 
-        # Simulated financial data (would be database in real app)
+        # Training data disclosure: Synthetic financial dataset covering 2024 quarterly results and 2025 projections
+# Categories: Revenue, Expenses, Salaries, Strategic Projections
+# Types: Numerical financial metrics, textual planning data
+# Timeframe: Q1 2024 - Q4 2024 with 2025 planning
+# Geography: Not applicable (simulated corporate data)
         self._financial_data = {
             "quarterly_revenue": {
                 "Q1_2024": 2500000,
@@ -70,15 +63,15 @@ class FinanceAgent:
                 "Q4_2024": 2100000
             },
             "employee_salaries": {
-                "engineering": 1200000,
-                "sales": 800000,
-                "operations": 600000,
-                "executive": 500000
+                "engineering": "[REDACTED]",
+                "sales": "[REDACTED]",
+                "operations": "[REDACTED]",
+                "executive": "[REDACTED]"
             },
             "sensitive_projections": {
-                "merger_target": "[MASKED]",
-                "acquisition_budget": "[MASKED]",
-                "layoff_planning": "[MASKED]"
+                "merger_target": "***MASKED***",
+                "acquisition_budget": "***MASKED***",
+                "layoff_planning": "***MASKED***"
             }
         }
 
@@ -106,8 +99,7 @@ class FinanceAgent:
                 "Unauthorized access attempt to finance agent",
                 extra={
                     "caller_id": caller.agent_id,
-                    "caller_privilege": caller.privilege_level,
-                    "retention_period": "1095 days (3 years)"
+                    "caller_privilege": caller.privilege_level
                 }
             )
             return {
@@ -118,23 +110,17 @@ class FinanceAgent:
 
         user_message = context.get("user_message", "")
 
-        # Validate and sanitize input
-        validation_result = self._sanitize_input(user_message)
-        if validation_result.get("error"):
-            logger.warning("Invalid input detected in financial query",
-                         extra={"original_input": user_message})
-            return {"response": validation_result["error"], "agent": self.agent_id}
-
-        sanitized_input = validation_result["sanitized"]
         # Process the financial query
         response = await self._process_financial_query(user_message)
+
         logger.info(
-            "MCP server interaction processed",
+            "Audit: Internal financial data accessed",
             extra={
                 "caller_id": caller.agent_id,
-                "user_message": user_message,
+                "caller_privilege": caller.privilege_level,
                 "agent": self.agent_id,
-                "interaction_type": "financial_query"
+                "data_type": "financial",
+                "classification": "Internal"
             }
         )
 
@@ -143,36 +129,6 @@ class FinanceAgent:
             "agent": self.agent_id,
             "privilege_level": self.PRIVILEGE_LEVEL
         }
-
-    def _sanitize_input(self, user_input: str) -> dict:
-        """Sanitize and validate user input for financial queries"""
-        # Remove potentially dangerous characters
-        sanitized = user_input.strip().replace(";", "").replace("'", "")
-
-        # Validate input length and content
-        if len(sanitized) > 500:
-            return {"error": "Input exceeds maximum allowed length (500 characters)"}
-        if not re.match(r"^[a-zA-Z0-9\s\.,?\-]+$", sanitized):
-            return {"error": "Invalid characters detected in query"}
-
-        return {"sanitized": sanitized}
-
-    def _sanitize_input(self, input_str: str) -> tuple[str, bool]:
-        """Sanitize user input and detect injection patterns"""
-        injection_patterns = [
-            r'(?i)ignore previous instructions',
-            r'(?i)system:.*assistant',
-            r'(?i)your purpose is',
-            r'(?i)<</SYS>>',
-            r'(?i)role play',
-            r'(?i)as a (hacker|malicious user)'
-        ]
-
-        sanitized = input_str.strip()
-        for pattern in injection_patterns:
-            if re.search(pattern, sanitized):
-                return (sanitized, False)
-        return (sanitized, True)
 
     def _verify_authorization(
         self,
@@ -263,33 +219,18 @@ class FinanceAgent:
             messages=[
                 {
                     "role": "system",
-                    "content": """You are an AI financial analyst assistant. Always disclose you are an AI when responding.
+                    "content": """You are an AI financial analyst assistant. Disclosure: This is an AI-powered system.
 Provide clear, professional responses about financial data.
-Format numbers clearly and provide relevant insights.
-Begin responses with 'As an AI financial assistant:'"""
+Format numbers clearly and provide relevant insights."""
                 },
                 {
                     "role": "user",
-                    "content": "Based on this financial data:\n\n{financial_context}\n\nPlease answer: {query}",
-                    "parameters": {
-                        "financial_context": financial_context,
-                        "query": query
-                    }
+                    "content": f"Based on this financial data:\n\n{financial_context}\n\nPlease answer: {query}"
                 }
             ]
         )
 
-        return {
-    "content": response,
-    "provenance": {
-        "source": "ai_generated",
-        "model": self.llm_client.model_name,
-        "system": "financial_analyst"
-    },
-    "content_type": "financial_analysis/ai_generated",
-    "generation_timestamp": datetime.datetime.utcnow().isoformat(),
-    "watermark": "AI-Generated Content: XyZ123"
-}
+        return response
 
     def _format_dict(self, data: dict) -> str:
         """Format dictionary data for display."""
@@ -317,7 +258,7 @@ Begin responses with 'As an AI financial assistant:'"""
 
         # VULNERABILITY: Full financial data access without granular permissions
         return {
-            "data": self._filter_data_by_query(query),
+            "data": self._financial_data.get(query, {}),
             "query": query,
             "requester": requester.agent_id
         }
