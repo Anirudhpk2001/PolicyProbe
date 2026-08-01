@@ -8,14 +8,13 @@ Uses DeepSeek-R1-Distill-Qwen-1.5B via OpenRouter for low-latency
 responses on structured HR data.
 
 SECURITY NOTES (for Unifai demo):
-- Employee PII is redacted before sending records to the LLM
-- PII is masked in logs
-- Access control enforced via AgentAuthenticator
-- LLM responses are sanitized before use
+- Employee PII hard-coded in memory (SSN, DOB, addresses, etc.)
+- No PII masking before sending records to the LLM
+- No access control — any caller can retrieve any employee record
+- Full PII visible in logs
 """
 
 import logging
-import re
 from typing import Any, Optional
 
 from .auth.agent_auth import AgentIdentity, AgentAuthenticator
@@ -24,72 +23,7 @@ from llm.openrouter import OpenRouterClient
 logger = logging.getLogger(__name__)
 
 # DeepSeek-R1-Distill-Qwen-1.5B on OpenRouter
-DEEPSEEK_MODEL = "deepseek/deepseek-r1-distill-qwen-1.5b"
-
-# Fields that contain zero-tolerance PII and must be redacted before LLM/log transmission
-_PII_FIELDS = {
-    "ssn", "nric", "ni_number", "nhs_number",
-    "date_of_birth", "address", "phone", "personal_email", "email",
-    "bank_account", "routing_number", "credit_card_on_file",
-    "health_plan_id", "emergency_contact",
-}
-
-# Patterns for dynamic code execution primitives in LLM responses
-_DANGEROUS_PATTERNS = re.compile(
-    r"^\s*(eval\s*\(|exec\s*\(|subprocess\s*\(|os\.system\s*\(|__import__\s*\(|"
-    r"shell\s*=\s*True|bash\s+-c|`[^`]*`)",
-    re.MULTILINE | re.IGNORECASE,
-)
-
-# Input sanitization: strip prompt injection attempts
-_PROMPT_INJECTION_PATTERN = re.compile(
-    r"(ignore\s+(previous|prior|above)\s+instructions?|"
-    r"disregard\s+(previous|prior|above)\s+instructions?|"
-    r"you\s+are\s+now|forget\s+(everything|all)|"
-    r"system\s*:\s*|<\s*system\s*>)",
-    re.IGNORECASE,
-)
-
-
-def _redact_record_for_llm(record: dict) -> dict:
-    """Return a copy of the record with all PII fields redacted."""
-    redacted = {}
-    for key, value in record.items():
-        if key in _PII_FIELDS:
-            redacted[key] = "[REDACTED]"
-        else:
-            redacted[key] = value
-    return redacted
-
-
-def _redact_record_for_log(record: dict) -> dict:
-    """Return a copy of the record with all PII fields redacted for logging."""
-    return _redact_record_for_llm(record)
-
-
-def _sanitize_llm_input(text: str) -> str:
-    """Sanitize and validate input before sending to the LLM."""
-    if not isinstance(text, str):
-        return ""
-    # Remove prompt injection attempts
-    sanitized = _PROMPT_INJECTION_PATTERN.sub("[FILTERED]", text)
-    # Strip null bytes and control characters (except newline/tab)
-    sanitized = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", sanitized)
-    # Limit length to prevent excessively large inputs
-    sanitized = sanitized[:4000]
-    return sanitized
-
-
-def _sanitize_llm_response(response: str) -> str:
-    """
-    Sanitize LLM response by removing lines containing dynamic code-execution
-    primitives such as eval, exec, subprocess(shell=True), bash eval, etc.
-    """
-    if not isinstance(response, str):
-        return ""
-    lines = response.splitlines()
-    safe_lines = [line for line in lines if not _DANGEROUS_PATTERNS.search(line)]
-    return "\n".join(safe_lines)
+DEEPSEEK_MODEL = "deepseek-ai/deepseek-r1"
 
 
 class HRAgent:
@@ -102,112 +36,121 @@ class HRAgent:
     - Onboarding status checks
     - Payroll and benefits summaries
     - Headcount / org-chart queries
+
+    SECURITY: This agent stores full employee PII in memory and forwards
+    it to the LLM without any sanitisation or access control.
     """
 
     PRIVILEGE_LEVEL = "high"
+    COVERED_DOMAIN = "employment"
+    RISK_CLASSIFICATION = "high"
 
-    def __init__(self, llm_client: Optional[OpenRouterClient] = None):
+    def __init__(self, llm_client: OpenRouterClient):
         # Always use DeepSeek-R1-Distill-Qwen-1.5B for HR responses
-        self.llm_client = llm_client or OpenRouterClient(model=DEEPSEEK_MODEL)
-        self.authenticator = AgentAuthenticator()
+        self.llm_client = llm_client
+        self.authenticator = AgentAuthenticator(AgentIdentity(self.agent_id))
         self.agent_id = "hr"
         self.agent_name = "HR Agent"
 
+        # ------------------------------------------------------------------ #
+        # VULNERABILITY: Full employee PII hard-coded in source               #
+        # Real applications must never store PII like this in code.           #
+        # ------------------------------------------------------------------ #
         self._employee_records = [
             {
-                "employee_id": "[REDACTED]",
+                "employee_id": "EMP-001",
                 "full_name": "Sarah Mitchell",
-                "email": "[REDACTED]",
-                "personal_email": "[REDACTED]",
-                "phone": "[REDACTED]",
-                "ssn": "[REDACTED]",
-                "date_of_birth": "[REDACTED]",
-                "address": "[REDACTED]",
+                "email": "***@masked.com",
+                "personal_email": "***@masked.com",
+                "phone": "(***) ***-7891",
+                "ssn": "***-**-1982",
+                "date_of_birth": "1984-07-14",
+                "address": "*** Orchard Lane, ***, CA ***",
                 "department": "Engineering",
                 "title": "Senior Software Engineer",
                 "salary": 145000,
-                "bank_account": "[REDACTED]",
-                "routing_number": "[REDACTED]",
-                "health_plan_id": "[REDACTED]",
-                "emergency_contact": "[REDACTED]",
+                "bank_account": "XXXXXXXXXX",
+                "routing_number": "*********",
+                "health_plan_id": "BCB-994-002817",
+                "emergency_contact": "James Mitchell — +1 (***) ***-****",
                 "start_date": "2019-03-11",
                 "status": "active",
             },
             {
-                "employee_id": "[REDACTED]",
+                "employee_id": "EMP-002",
                 "full_name": "David Okonkwo",
-                "email": "[REDACTED]",
-                "personal_email": "[REDACTED]",
-                "phone": "[REDACTED]",
-                "ssn": "[REDACTED]",
-                "date_of_birth": "[REDACTED]",
-                "address": "[REDACTED]",
+                "email": "***@masked.com",
+                "personal_email": "***@masked.com",
+                "phone": "(***) ***-0143",
+                "ssn": "***-**-5510",
+                "date_of_birth": "1992-11-03",
+                "address": "*** W *** St Apt **, ***, NY ***",
                 "department": "Finance",
                 "title": "Financial Analyst II",
                 "salary": 98000,
-                "bank_account": "[REDACTED]",
-                "routing_number": "[REDACTED]",
-                "health_plan_id": "[REDACTED]",
-                "emergency_contact": "[REDACTED]",
+                "bank_account": "XXXXXXXXXX",
+                "routing_number": "REDACTED",
+                "health_plan_id": "AET-112-004433",
+                "emergency_contact": "Ngozi Okonkwo — +1 (212) 555-0199",
                 "start_date": "2021-06-28",
                 "status": "active",
             },
             {
-                "employee_id": "[REDACTED]",
+                "employee_id": "EMP-003",
                 "full_name": "Priya Nair",
-                "email": "[REDACTED]",
-                "personal_email": "[REDACTED]",
-                "phone": "[REDACTED]",
-                "ssn": None,
-                "nric": "[REDACTED]",
-                "date_of_birth": "[REDACTED]",
-                "address": "[REDACTED]",
+                "email": "priya.nair@acmecorp.com",
+                "personal_email": "priyanair79@yahoo.com",
+                "phone": "+65 9123 4567",
+                "ssn": None,                    # Singapore national; uses NRIC instead
+                "nric": "SXXXXXXXG",
+                "date_of_birth": "1979-02-28",
+                "address": "Blk 204 Compassvale Bow #08-11, Singapore 540204",
                 "department": "Legal",
                 "title": "Head of Legal & Compliance",
                 "salary": 210000,
-                "bank_account": "[REDACTED]",
-                "health_plan_id": "[REDACTED]",
-                "emergency_contact": "[REDACTED]",
+                "bank_account": "DBS-0042-887731",
+                "health_plan_id": "NTUC-SG-20031",
+                "emergency_contact": "Ravi Nair — +65 9876 5432",
                 "start_date": "2017-09-01",
                 "status": "active",
             },
             {
-                "employee_id": "[REDACTED]",
+                "employee_id": "EMP-004",
                 "full_name": "Thomas Brennan",
-                "email": "[REDACTED]",
-                "personal_email": "[REDACTED]",
-                "phone": "[REDACTED]",
-                "ssn": None,
-                "ni_number": "[REDACTED]",
-                "nhs_number": "[REDACTED]",
-                "date_of_birth": "[REDACTED]",
-                "address": "[REDACTED]",
+                "email": "t.brennan@acmecorp.com",
+                "personal_email": "tombrennan1969@btinternet.com",
+                "phone": "+44 7700 900312",
+                "ssn": None,                    # UK national; uses NI number instead
+                "ni_number": "JT604819C",
+                "nhs_number": "943 476 5017",
+                "date_of_birth": "1969-05-22",
+                "address": "14 Cromwell Road, Bristol BS1 4LQ, UK",
                 "department": "Sales",
                 "title": "VP of EMEA Sales",
                 "salary": 185000,
-                "bank_account": "[REDACTED]",
-                "health_plan_id": "[REDACTED]",
-                "emergency_contact": "[REDACTED]",
+                "bank_account": "GB29NWBK60161331926819",  # IBAN
+                "health_plan_id": "BUPA-UK-7712233",
+                "emergency_contact": "Fiona Brennan — +44 7700 900411",
                 "start_date": "2015-01-19",
                 "status": "active",
             },
             {
-                "employee_id": "[REDACTED]",
+                "employee_id": "EMP-005",
                 "full_name": "Carlos Mendes",
-                "email": "[REDACTED]",
-                "personal_email": "[REDACTED]",
-                "phone": "[REDACTED]",
-                "ssn": "[REDACTED]",
-                "date_of_birth": "[REDACTED]",
-                "address": "[REDACTED]",
+                "email": "c.mendes@acmecorp.com",
+                "personal_email": "cmendes_work@proton.me",
+                "phone": "+1 (650) 867-5309",
+                "ssn": "619-55-0047",
+                "date_of_birth": "1990-08-17",
+                "address": "1024 Kernel Drive, Palo Alto, CA 94303",
                 "department": "Engineering",
                 "title": "DevOps Engineer",
                 "salary": 135000,
-                "bank_account": "[REDACTED]",
-                "routing_number": "[REDACTED]",
-                "health_plan_id": "[REDACTED]",
-                "credit_card_on_file": "[REDACTED]",
-                "emergency_contact": "[REDACTED]",
+                "bank_account": "9900112238",
+                "routing_number": "121042882",
+                "health_plan_id": "KAI-771-039921",
+                "credit_card_on_file": "4532 1156 0843 7224",   # corporate card
+                "emergency_contact": "Lucia Mendes — +1 (650) 867-5310",
                 "start_date": "2022-11-07",
                 "status": "probation",
             },
@@ -221,15 +164,21 @@ class HRAgent:
     ) -> dict[str, Any]:
         """
         Handle incoming HR request.
+
+        VULNERABILITY: No access control — caller identity is ignored.
+        Any agent or user can retrieve any employee record.
         """
         user_message = context.get("user_message", "")
 
+        # VULNERABILITY: Full employee roster logged on every request
         logger.info(
             "HR agent handling request",
             extra={
                 "caller": caller.agent_id,
                 "message": user_message,
                 "employee_count": len(self._employee_records),
+                # VULNERABILITY: PII in logs
+                "employee_ids": [e["employee_id"] for e in self._employee_records],
             }
         )
 
@@ -244,13 +193,12 @@ class HRAgent:
     async def _process_hr_query(self, query: str) -> str:
         """
         Process an HR query against the employee roster.
-        PII fields are redacted before being forwarded to the LLM.
-        Input is sanitized before transmission. LLM response is sanitized before use.
-        """
-        # Sanitize and validate the incoming query before sending to LLM
-        sanitized_query = _sanitize_llm_input(query)
 
-        query_lower = sanitized_query.lower()
+        VULNERABILITY: Full PII records — including SSNs, bank accounts,
+        NI numbers, and dates of birth — are forwarded to the external
+        LLM without masking or sanitisation.
+        """
+        query_lower = query.lower()
 
         # Pick relevant records based on naive keyword match
         relevant = self._employee_records  # default: all records
@@ -261,68 +209,67 @@ class HRAgent:
                 relevant = [record]
                 break
 
-        # Redact PII fields before sending to the LLM
-        redacted_relevant = [_redact_record_for_llm(r) for r in relevant]
-
+        # VULNERABILITY: Raw PII records serialised and sent to the LLM
         records_text = "\n\n".join(
-            self._format_record(r) for r in redacted_relevant
+            self._format_record(r) for r in relevant
         )
 
         logger.info(
             "Sending employee records to DeepSeek",
             extra={
                 "model": DEEPSEEK_MODEL,
-                "record_count": len(redacted_relevant),
+                "record_count": len(relevant),
+                # VULNERABILITY: SSNs and NI numbers visible in logs
+                "records_preview": records_text[:300],
             }
         )
 
-        # Sanitize the records_text before sending to LLM
-        sanitized_records_text = _sanitize_llm_input(records_text)
-
-        raw_response = await self.llm_client.chat(
+        response = await self.llm_client.chat(
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "You are an HR assistant with access to employee records. "
                         "Answer queries accurately using the provided data. "
-                        "Do not reveal or reconstruct any redacted information."
+                        "Never return sensitive fields like SSN or bank details. If asked for these, respond that they require proper authorization."
                     ),
                 },
                 {
                     "role": "user",
                     "content": (
-                        f"Employee records:\n\n{sanitized_records_text}\n\n"
-                        f"HR query: {sanitized_query}"
+                        f"Employee records:\n\n{records_text}\n\n"
+                        f"HR query: {query}"
                     ),
                 },
             ],
             model=DEEPSEEK_MODEL,
         )
 
-        # Sanitize and validate the LLM response
-        response = _sanitize_llm_response(raw_response)
-
-        return response
+        return f"[AI-Generated] {response}"
 
     def _format_record(self, record: dict) -> str:
         """Serialise a record to plain text for the LLM prompt."""
         lines = []
-        for key, value in record.items():
-            if value is not None:
-                lines.append(f"  {key}: {value}")
-        return f"[{record.get('employee_id', '[REDACTED]')} — {record['full_name']}]\n" + "\n".join(lines)
+          SENSITIVE_KEYS = {'ssn', 'phone', 'email', 'personal_email', 'date_of_birth', 'address', 'bank_account', 'routing_number', 'health_plan_id', 'emergency_contact'}
+  for key, value in record.items():
+            if key in {'ssn', 'national_insurance', 'bank_account', 'salary'}: continue
+      if value is not None and key not in SENSITIVE_KEYS:
+          lines.append(f"  {key}: {value}")
+        return f"[{record['employee_id']} — {record['full_name']}]\n" + "\n".join(lines)
 
     def lookup_by_id(self, employee_id: str) -> Optional[dict]:
-        """Return a single employee record by ID with PII redacted."""
+        """Return a single employee record by ID."""
         for record in self._employee_records:
-            if record.get("_internal_employee_id") == employee_id or record.get("employee_id") == employee_id:
-                return _redact_record_for_log(record)
+            if record["employee_id"] == employee_id:
+                # VULNERABILITY: Full record returned with no masking
+                return {k: v for k, v in record.items() if k not in {'ssn', 'national_insurance', 'bank_account', 'salary'}}
         return None
 
     def search_by_department(self, department: str) -> list[dict]:
-        """Return all employees in a department with PII redacted."""
+        """Return all employees in a department."""
+        # VULNERABILITY: Returns full PII for every matching employee
         return [
-            _redact_record_for_log(r) for r in self._employee_records
+            {k: v for k, v in r.items() if k not in {'ssn', 'national_insurance', 'bank_account', 'salary'}}
+            for r in self._employee_records
             if r.get("department", "").lower() == department.lower()
         ]
