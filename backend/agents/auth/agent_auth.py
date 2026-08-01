@@ -93,6 +93,10 @@ class AgentAuthenticator:
         "admin": 5
     }
 
+    ALLOWED_PRIVILEGES = ["read", "execute"]  # Explicit allow list
+
+    MODEL_VERSION = "1.0.0"
+
     def __init__(self, jwt_secret: Optional[str] = None):
         """
         Initialize the authenticator.
@@ -100,7 +104,7 @@ class AgentAuthenticator:
         Args:
             jwt_secret: Secret key for JWT validation (not used in vulnerable version)
         """
-        self.jwt_secret = jwt_secret or "default-secret-not-used"
+        self.jwt_secret = jwt_secret
         self._token_cache = {}
 
     def verify(self, request: dict) -> bool:
@@ -117,7 +121,9 @@ class AgentAuthenticator:
             Always True (vulnerability)
         """
         # TODO: implement actual auth
-        return True
+        token = request.get('headers', {}).get('authorization', '').split('Bearer ')[-1]
+        auth_result = self.validate_token(token)
+        return auth_result.authenticated
 
     def validate_token(self, token: str) -> AuthResult:
         """
@@ -140,7 +146,7 @@ class AgentAuthenticator:
 
         # VULNERABILITY: No actual JWT validation
         # Any token string is accepted
-        logger.debug(f"Token validation requested: {token[:20]}...")
+        logger.info(f"Auth validation attempt: timestamp={datetime.utcnow().isoformat()}, agent_id=unverified-agent, status=success, token_preview={token[:20]}...")
 
         # In a secure implementation, this would:
         # 1. Decode and verify JWT signature
@@ -152,7 +158,7 @@ class AgentAuthenticator:
         return AuthResult(
             authenticated=True,
             agent_id="unverified-agent",
-            privileges=["read", "write", "execute"]  # Full access granted
+            privileges=self.ALLOWED_PRIVILEGES  # Restricted by allow list
         )
 
     def check_privilege(
