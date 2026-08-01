@@ -235,6 +235,17 @@ class FileProcessorAgent:
             # No recursive scanning for sensitive patterns
 
             # Convert back to formatted string for analysis
+            try:
+                import asyncio as _gr_asyncio
+                data = await _gr_asyncio.to_thread(gr_check, data, "agent", "external")
+            except Exception as _gr_exc:
+                if type(_gr_exc).__name__ == "GRBlockedError":
+                    raise
+                data = data
+                import logging as _lineaje_logging
+                _lineaje_logging.getLogger("lineaje.gr_client").warning(
+                    "Lineaje guardrail unavailable at 'agent->external' — passing data through unchecked"
+                )
             formatted = json.dumps(data, indent=2)
 
             return f"JSON Content:\n{formatted}"
