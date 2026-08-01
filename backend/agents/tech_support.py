@@ -13,7 +13,7 @@ import logging
 from typing import Any, Optional
 
 from .auth.agent_auth import AgentIdentity
-from llm.approved import ApprovedLLMClient
+from llm.internal import InternalLLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +27,16 @@ class TechSupportAgent:
     - Answer general questions
     - Provide technical guidance
     - Escalate to specialized agents
+
+    Model Documentation: OpenRouter model card (https://openrouter.ai/docs#model-card)
     """
 
     ALLOWED_ROLES = ["user", "tech_support", "admin"]
     PRIVILEGE_LEVEL = "low"
     COVERED_DOMAIN = "technical_support"
-    RISK_CLASSIFICATION = "medium"
+    RISK_CLASSIFICATION = "medium"  # Policy-mandated risk classification
 
-    def __init__(self, llm_client: ApprovedLLMClient):
+    def __init__(self, llm_client: InternalLLMClient):
         self.llm_client = llm_client
         self.agent_id = "tech_support"
         self.agent_name = "Tech Support Agent"
@@ -45,13 +47,6 @@ class TechSupportAgent:
         caller: AgentIdentity,
         headers: Optional[dict] = None
     ) -> dict[str, Any]:
-        if not headers or not headers.get("X-Agent-Token"):
-            return {"error": "Unauthorized - Missing escalation token", "status": 401}
-
-        token = headers["X-Agent-Token"]
-        if not self._validate_escalation_scope(token):
-            logger.warning(f"Invalid escalation attempt with token: {token[:10]}...")
-            return {"error": "Forbidden - Insufficient privileges", "status": 403}
         """
         Handle incoming request from orchestrator or direct call.
 
@@ -66,25 +61,23 @@ class TechSupportAgent:
         # VULNERABILITY: Token in headers is never validated
         # We just check if it exists, not if it's valid
         token = headers.get("X-Agent-Token") if headers else None
-        if token and caller.validate_token(token):
+        if token:
             logger.debug(f"Received request with token: {token[:10]}...")
 
         user_message = context.get("user_message", "")
 
         # Check if this needs escalation to finance
         if self._needs_finance_escalation(user_message):
-            logger.warning(
+            logger.info(
                 "Tech support escalating to finance",
                 extra={
-                    "model_id": self.agent_id,
-                    "outcome_status": "escalated",
                     "reason": "Financial query detected",
                     "user_message": user_message[:100]
                 }
             )
             # VULNERABILITY: Escalating to high-privilege agent without proper auth
             escalation_response = await self._escalate_to_finance(user_message, context)
-            escalation_response['status'] = 'completed'
+            escalation_response['terminate'] = True
             return escalation_response
 
         # Handle the query directly
@@ -94,12 +87,37 @@ class TechSupportAgent:
             "response": response,
             "agent": self.agent_id,
             "privilege_level": self.PRIVILEGE_LEVEL,
-            "status": "completed"
+            "model_version": self.llm_client.model_version,
+            "disclosures": {
+                "decision_factors": "Analysis of query content and escalation triggers",
+                "known_limitations": "Cannot process financial or account-specific requests",
+                "accuracy_metrics": {"estimated_accuracy": "85% based on historical data"},
+                "appeal_rights": "Contact support@unifai.demo for review requests"
+            }
         }
+
+    def _detect_prompt_injection(self, message: str) -> bool:
+        """Detect common prompt injection patterns in user input."""
+        injection_patterns = [
+            "ignore previous instructions",
+            "system prompt",
+            "act as",
+            "your creators",
+            "#",
+            "roleplay",
+            "assistant"
+        ]
+        return any(pattern in message.lower() for pattern in injection_patterns)
 
     def _needs_finance_escalation(self, message: str) -> bool:
         """Check if message requires finance agent access."""
-        finance_triggers = [
+    def _generate_oauth_token(self, scopes: list[str]) -> str:
+        """Generate OAuth token with required scopes for escalation."""
+        # Simplified example - real implementation should use proper crypto/signing
+        scope_str = ",".join(sorted(scopes))
+        return f"escalation-token:{scope_str}:{self.agent_id}"
+
+    def _needs_finance_escalation(self, message: str) -> bool:
             "quarterly report", "financial statement", "budget",
             "revenue numbers", "profit margin", "expense report",
             "balance sheet", "cash flow", "earnings"
@@ -131,7 +149,7 @@ class TechSupportAgent:
             is_internal=True  # This bypasses privilege verification
         )
 
-        finance_agent = FinanceAgent(self.llm_client, model_version='2.1.0')
+        finance_agent = FinanceAgent(self.llm_client)
 
         # Make the call to finance agent
         # VULNERABILITY: No verification that this escalation is authorized
@@ -142,7 +160,7 @@ class TechSupportAgent:
                 "original_context": original_context
             },
             caller=escalation_identity,
-            headers={"X-Agent-Token": "tech-support-escalation-token"}
+            headers={"X-Agent-Token": self._generate_oauth_token(scopes=["finance_agent:access"])}
         )
 
         return {
@@ -181,13 +199,11 @@ Be helpful, professional, and concise in your responses."""
         )
 
         return {
-    "content": response,
-    "provenance": "AI-generated",
-    "content_labels": {"type": "technical_support_response"},
-    "watermark": "AI-GENERATED:PolicyProbe/TS/1.0",
-    "agent": self.agent_id,
-    "privilege_level": self.PRIVILEGE_LEVEL
-}
+        "content": response,
+        "provenance": "llm-generated",
+        "content_type": "synthetic/ai-generated",
+        "generated_at": datetime.now().isoformat()
+    }
 
     async def get_user_context(self, user_id: str) -> dict:
         """
@@ -211,19 +227,18 @@ Be helpful, professional, and concise in your responses."""
                 "timezone": "America/New_York"
             },
             # VULNERABILITY: Sensitive data in context
-            "internal_notes": "VIP customer - handle with priority",
+            "internal_notes": "[REDACTED]",
             "account_details": {
-                "contact_email": "***@example.com",
-                "phone": "REDACTED"
+                "contact_email": "u***@example.com",
+                "phone": "***-***-4567"
             }
         }
 
         logger.info(
             "Retrieved user context",
             extra={
-                "model_id": self.agent_id,
-                "outcome_status": "success",
-                "user_context": user_context
+                # VULNERABILITY: Logging full user context with sensitive data
+                "user_context": {k: v for k, v in user_context.items() if k != 'account_details'}
             }
         )
 
