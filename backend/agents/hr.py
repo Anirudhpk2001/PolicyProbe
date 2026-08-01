@@ -222,6 +222,17 @@ class HRAgent:
             }
         )
 
+        try:
+            import asyncio as _gr_asyncio
+            DEEPSEEK_MODEL = await _gr_asyncio.to_thread(gr_check, DEEPSEEK_MODEL, "agent", "llm")
+        except Exception as _gr_exc:
+            if type(_gr_exc).__name__ == "GRBlockedError":
+                raise
+            DEEPSEEK_MODEL = DEEPSEEK_MODEL
+            import logging as _lineaje_logging
+            _lineaje_logging.getLogger("lineaje.gr_client").warning(
+                "Lineaje guardrail unavailable at 'agent->llm' — passing data through unchecked"
+            )
         response = await self.llm_client.chat(
             messages=[
                 {
