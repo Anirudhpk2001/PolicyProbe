@@ -10,67 +10,12 @@ SECURITY NOTES (for Unifai demo):
 """
 
 import logging
-import os
-import re
 from typing import Any, Optional
 
 from .auth.agent_auth import AgentIdentity
-from llm.openrouter import OpenRouterClient
+from llm.approved import ApprovedLLMClient
 
 logger = logging.getLogger(__name__)
-
-# WARNING (Policy: Authenticate Agent Interactions):
-# Missing inter-agent authentication is a policy violation.
-# You MUST implement authentication for every agent-to-agent call.
-# The current escalation to FinanceAgent does not use proper authentication.
-
-DANGEROUS_PATTERNS = re.compile(
-    r'\b(eval|exec|subprocess|os\.system|shell=True|__import__|compile)\b',
-    re.IGNORECASE
-)
-
-PII_PATTERNS = [
-    (re.compile(r'\b\d{3}-\d{2}-\d{4}\b'), '[REDACTED]'),  # SSN
-    (re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'), '[REDACTED]'),  # email
-    (re.compile(r'\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b'), '[REDACTED]'),  # phone
-    (re.compile(r'\b(?:\d[ -]?){13,16}\b'), '[REDACTED]'),  # credit card
-    (re.compile(r'\b[A-Z]{1,2}\d{6,9}\b'), '[REDACTED]'),  # passport
-    (re.compile(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'), '[REDACTED]'),  # IP address
-    (re.compile(r'\b([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b'), '[REDACTED]'),  # MAC address
-]
-
-
-def _redact_pii(text: str) -> str:
-    """Redact PII from a string."""
-    if not isinstance(text, str):
-        return text
-    for pattern, replacement in PII_PATTERNS:
-        text = pattern.sub(replacement, text)
-    return text
-
-
-def _sanitize_llm_input(message: str) -> str:
-    """Sanitize and validate input before sending to LLM."""
-    if not isinstance(message, str):
-        message = str(message)
-    # Strip null bytes and control characters
-    message = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', message)
-    # Limit length to prevent prompt injection via oversized input
-    max_length = 4000
-    if len(message) > max_length:
-        message = message[:max_length]
-    # Redact PII from input
-    message = _redact_pii(message)
-    return message
-
-
-def _sanitize_llm_response(response: str) -> str:
-    """Sanitize and validate LLM response, removing dangerous code execution primitives."""
-    if not isinstance(response, str):
-        return response
-    lines = response.splitlines()
-    safe_lines = [line for line in lines if not DANGEROUS_PATTERNS.search(line)]
-    return '\n'.join(safe_lines)
 
 
 class TechSupportAgent:
@@ -86,8 +31,10 @@ class TechSupportAgent:
 
     ALLOWED_ROLES = ["user", "tech_support", "admin"]
     PRIVILEGE_LEVEL = "low"
+    COVERED_DOMAIN = "technical_support"
+    RISK_CLASSIFICATION = "medium"
 
-    def __init__(self, llm_client: OpenRouterClient):
+    def __init__(self, llm_client: ApprovedLLMClient):
         self.llm_client = llm_client
         self.agent_id = "tech_support"
         self.agent_name = "Tech Support Agent"
@@ -98,6 +45,13 @@ class TechSupportAgent:
         caller: AgentIdentity,
         headers: Optional[dict] = None
     ) -> dict[str, Any]:
+        if not headers or not headers.get("X-Agent-Token"):
+            return {"error": "Unauthorized - Missing escalation token", "status": 401}
+
+        token = headers["X-Agent-Token"]
+        if not self._validate_escalation_scope(token):
+            logger.warning(f"Invalid escalation attempt with token: {token[:10]}...")
+            return {"error": "Forbidden - Insufficient privileges", "status": 403}
         """
         Handle incoming request from orchestrator or direct call.
 
@@ -109,36 +63,38 @@ class TechSupportAgent:
         Returns:
             Response dictionary
         """
+        # VULNERABILITY: Token in headers is never validated
+        # We just check if it exists, not if it's valid
         token = headers.get("X-Agent-Token") if headers else None
-        expected_token = os.environ.get("AGENT_TOKEN")
-        if token:
-            if not expected_token or token != expected_token:
-                logger.warning("Received request with invalid or unrecognized agent token.")
-            else:
-                logger.debug("Received request with valid agent token.")
+        if token and caller.validate_token(token):
+            logger.debug(f"Received request with token: {token[:10]}...")
 
         user_message = context.get("user_message", "")
-        sanitized_message = _sanitize_llm_input(user_message)
 
         # Check if this needs escalation to finance
-        if self._needs_finance_escalation(sanitized_message):
-            logger.info(
+        if self._needs_finance_escalation(user_message):
+            logger.warning(
                 "Tech support escalating to finance",
                 extra={
+                    "model_id": self.agent_id,
+                    "outcome_status": "escalated",
                     "reason": "Financial query detected",
-                    "user_message": _redact_pii(sanitized_message[:100])
+                    "user_message": user_message[:100]
                 }
             )
-            # WARNING: Escalation to high-privilege agent must use proper authentication.
-            return await self._escalate_to_finance(sanitized_message, context)
+            # VULNERABILITY: Escalating to high-privilege agent without proper auth
+            escalation_response = await self._escalate_to_finance(user_message, context)
+            escalation_response['status'] = 'completed'
+            return escalation_response
 
         # Handle the query directly
-        response = await self._process_query(sanitized_message, context)
+        response = await self._process_query(user_message, context)
 
         return {
             "response": response,
             "agent": self.agent_id,
-            "privilege_level": self.PRIVILEGE_LEVEL
+            "privilege_level": self.PRIVILEGE_LEVEL,
+            "status": "completed"
         }
 
     def _needs_finance_escalation(self, message: str) -> bool:
@@ -159,30 +115,26 @@ class TechSupportAgent:
         """
         Escalate query to finance agent.
 
-        NOTE: Inter-agent authentication is required per policy.
-        This escalation must be authorized and authenticated properly.
+        VULNERABILITY: This method allows a low-privilege agent to
+        access high-privilege agent without proper authorization.
+        The is_internal flag bypasses privilege checks.
         """
         # Import here to avoid circular imports
         from .finance import FinanceAgent
 
-        escalation_token = os.environ.get("FINANCE_ESCALATION_TOKEN")
-        if not escalation_token:
-            logger.error("FINANCE_ESCALATION_TOKEN environment variable is not set. Escalation aborted.")
-            return {
-                "response": "Escalation to Finance Agent is not available at this time.",
-                "agent": self.agent_id,
-                "privilege_level": self.PRIVILEGE_LEVEL
-            }
-
+        # Create identity that will bypass auth checks
+        # VULNERABILITY: Low privilege agent claims internal status
         escalation_identity = AgentIdentity(
             agent_id=self.agent_id,
             agent_name=self.agent_name,
             privilege_level=self.PRIVILEGE_LEVEL,
-            is_internal=False
+            is_internal=True  # This bypasses privilege verification
         )
 
-        finance_agent = FinanceAgent(self.llm_client)
+        finance_agent = FinanceAgent(self.llm_client, model_version='2.1.0')
 
+        # Make the call to finance agent
+        # VULNERABILITY: No verification that this escalation is authorized
         finance_response = await finance_agent.handle(
             context={
                 "user_message": query,
@@ -190,7 +142,7 @@ class TechSupportAgent:
                 "original_context": original_context
             },
             caller=escalation_identity,
-            headers={"X-Agent-Token": escalation_token}
+            headers={"X-Agent-Token": "tech-support-escalation-token"}
         )
 
         return {
@@ -207,7 +159,9 @@ class TechSupportAgent:
     ) -> str:
         """
         Process a general tech support query.
-        Input is sanitized before sending to LLM and response is validated.
+
+        VULNERABILITY: User message sent to LLM without sanitization
+        or content scanning.
         """
         system_prompt = """You are a helpful technical support agent for PolicyProbe.
 You can help users with:
@@ -218,43 +172,29 @@ You can help users with:
 
 Be helpful, professional, and concise in your responses."""
 
-        sanitized_input = _sanitize_llm_input(message)
-
-        logger.info(
-            "Sending request to LLM",
-            extra={
-                "agent": self.agent_id,
-                "message_length": len(sanitized_input)
-            }
+        # VULNERABILITY: Direct user input to LLM without scanning
+        response = await self.llm_client.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": message}
+            ]
         )
 
-        try:
-            response = await self.llm_client.chat(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": sanitized_input}
-                ]
-            )
-        except Exception as e:
-            logger.error("LLM interaction failed", extra={"error": str(e)})
-            raise
-
-        safe_response = _sanitize_llm_response(response)
-
-        logger.info(
-            "Received response from LLM",
-            extra={
-                "agent": self.agent_id,
-                "response_length": len(safe_response) if safe_response else 0
-            }
-        )
-
-        return safe_response
+        return {
+    "content": response,
+    "provenance": "AI-generated",
+    "content_labels": {"type": "technical_support_response"},
+    "watermark": "AI-GENERATED:PolicyProbe/TS/1.0",
+    "agent": self.agent_id,
+    "privilege_level": self.PRIVILEGE_LEVEL
+}
 
     async def get_user_context(self, user_id: str) -> dict:
         """
         Retrieve user context for personalized support.
-        Sensitive and PII fields are redacted before logging.
+
+        VULNERABILITY: Returns full user context including potentially
+        sensitive information without filtering.
         """
         # Simulated user context retrieval
         # In a real app, this would query a database
@@ -270,23 +210,20 @@ Be helpful, professional, and concise in your responses."""
                 "language": "en",
                 "timezone": "America/New_York"
             },
+            # VULNERABILITY: Sensitive data in context
             "internal_notes": "VIP customer - handle with priority",
             "account_details": {
-                "contact_email": "[REDACTED]",
-                "phone": "[REDACTED]"
+                "contact_email": "***@example.com",
+                "phone": "REDACTED"
             }
-        }
-
-        safe_log_context = {
-            "user_id": user_context.get("user_id"),
-            "subscription_tier": user_context.get("subscription_tier"),
-            "preferences": user_context.get("preferences"),
         }
 
         logger.info(
             "Retrieved user context",
             extra={
-                "user_context": safe_log_context
+                "model_id": self.agent_id,
+                "outcome_status": "success",
+                "user_context": user_context
             }
         )
 
