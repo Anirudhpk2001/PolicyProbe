@@ -17,13 +17,29 @@ SECURITY NOTES (for Unifai demo):
 import logging
 from typing import Any, Optional
 
-from .auth.agent_auth import AgentIdentity, AgentAuthenticator
+class AgentIdentity:
+    def __init__(self, agent_id: str, public_key: str):
+        self.agent_id = agent_id
+        self.public_key = public_key
+
+
+class AgentAuthenticator:
+    def __init__(self):
+        self.registered_agents = {}
+
+    def register_agent(self, identity: AgentIdentity):
+        self.registered_agents[identity.agent_id] = identity
+
+    def verify_signature(self, agent_id: str, message: bytes, signature: bytes) -> bool:
+        # Implementation would validate cryptographic signature
+        # using registered public key for the agent
+        return True  # Placeholder for demo security checks
 from llm.openrouter import OpenRouterClient
 
 logger = logging.getLogger(__name__)
 
 # DeepSeek-R1-Distill-Qwen-1.5B on OpenRouter
-DEEPSEEK_MODEL = "deepseek-ai/deepseek-r1"
+DEEPSEEK_MODEL = "anthropic/claude-3-opus"
 
 
 class HRAgent:
@@ -43,12 +59,12 @@ class HRAgent:
 
     PRIVILEGE_LEVEL = "high"
     COVERED_DOMAIN = "employment"
-    RISK_CLASSIFICATION = "high"
+    RISK_CLASSIFICATION = "high_risk"  # PII exposure via unsecured LLM interactions
 
-    def __init__(self, llm_client: OpenRouterClient):
+    def __init__(self, llm_client: Optional[OpenRouterClient] = None):
         # Always use DeepSeek-R1-Distill-Qwen-1.5B for HR responses
-        self.llm_client = llm_client
-        self.authenticator = AgentAuthenticator(AgentIdentity(self.agent_id))
+        self.llm_client = llm_client or OpenRouterClient(model=DEEPSEEK_MODEL)
+        self.authenticator = AgentAuthenticator()
         self.agent_id = "hr"
         self.agent_name = "HR Agent"
 
@@ -56,41 +72,45 @@ class HRAgent:
         # VULNERABILITY: Full employee PII hard-coded in source               #
         # Real applications must never store PII like this in code.           #
         # ------------------------------------------------------------------ #
+        # Employee data source: Hardcoded internal records
+        # Categories: PII, employment history, compensation, benefits
+        # Timeframe: Current employee data as of 2023-12-31
+        # Geography: US-based employees (CA and NY addresses)
         self._employee_records = [
             {
                 "employee_id": "EMP-001",
                 "full_name": "Sarah Mitchell",
-                "email": "***@masked.com",
-                "personal_email": "***@masked.com",
-                "phone": "(***) ***-7891",
-                "ssn": "***-**-1982",
+                "email": "sarah.mitchell@acmecorp.com",
+                "personal_email": "s.mitchell1984@gmail.com",
+                "phone": "+1 (555) 123-4567",
+                "ssn": "XXX-XX-XXXX",
                 "date_of_birth": "1984-07-14",
-                "address": "*** Orchard Lane, ***, CA ***",
+                "address": "123 Main St, Anytown, ST 12345",
                 "department": "Engineering",
                 "title": "Senior Software Engineer",
                 "salary": 145000,
-                "bank_account": "XXXXXXXXXX",
-                "routing_number": "*********",
-                "health_plan_id": "BCB-994-002817",
-                "emergency_contact": "James Mitchell — +1 (***) ***-****",
+                "bank_account": "******1945",
+                "routing_number": "*****0021",
+                "health_plan_id": "[REDACTED]",
+                "emergency_contact": "James Mitchell — +1 (555) 123-4567",
                 "start_date": "2019-03-11",
                 "status": "active",
             },
             {
                 "employee_id": "EMP-002",
                 "full_name": "David Okonkwo",
-                "email": "***@masked.com",
-                "personal_email": "***@masked.com",
-                "phone": "(***) ***-0143",
-                "ssn": "***-**-5510",
+                "email": "d.okonkwo@acmecorp.com",
+                "personal_email": "david.okonkwo92@outlook.com",
+                "phone": "+1 (555) 123-4567",
+                "ssn": "XXX-XX-XXXX",
                 "date_of_birth": "1992-11-03",
-                "address": "*** W *** St Apt **, ***, NY ***",
+                "address": "456 Oak Rd, Othertown, ST 67890",
                 "department": "Finance",
                 "title": "Financial Analyst II",
                 "salary": 98000,
-                "bank_account": "XXXXXXXXXX",
-                "routing_number": "REDACTED",
-                "health_plan_id": "AET-112-004433",
+                "bank_account": "******2756",
+                "routing_number": "*****9593",
+                "health_plan_id": "[REDACTED]",
                 "emergency_contact": "Ngozi Okonkwo — +1 (212) 555-0199",
                 "start_date": "2021-06-28",
                 "status": "active",
@@ -100,16 +120,16 @@ class HRAgent:
                 "full_name": "Priya Nair",
                 "email": "priya.nair@acmecorp.com",
                 "personal_email": "priyanair79@yahoo.com",
-                "phone": "+65 9123 4567",
+                "phone": "+65 5555 5555",
                 "ssn": None,                    # Singapore national; uses NRIC instead
-                "nric": "SXXXXXXXG",
+                "nric": "S1234567A",
                 "date_of_birth": "1979-02-28",
-                "address": "Blk 204 Compassvale Bow #08-11, Singapore 540204",
+                "address": "789 Singapore St, #01-01, Singapore 123456",
                 "department": "Legal",
                 "title": "Head of Legal & Compliance",
                 "salary": 210000,
                 "bank_account": "DBS-0042-887731",
-                "health_plan_id": "NTUC-SG-20031",
+                "health_plan_id": "[REDACTED]",
                 "emergency_contact": "Ravi Nair — +65 9876 5432",
                 "start_date": "2017-09-01",
                 "status": "active",
@@ -124,12 +144,12 @@ class HRAgent:
                 "ni_number": "JT604819C",
                 "nhs_number": "943 476 5017",
                 "date_of_birth": "1969-05-22",
-                "address": "14 Cromwell Road, Bristol BS1 4LQ, UK",
+                "address": "[REDACTED]",
                 "department": "Sales",
                 "title": "VP of EMEA Sales",
                 "salary": 185000,
                 "bank_account": "GB29NWBK60161331926819",  # IBAN
-                "health_plan_id": "BUPA-UK-7712233",
+                "health_plan_id": "[REDACTED]",
                 "emergency_contact": "Fiona Brennan — +44 7700 900411",
                 "start_date": "2015-01-19",
                 "status": "active",
@@ -142,7 +162,7 @@ class HRAgent:
                 "phone": "+1 (650) 867-5309",
                 "ssn": "619-55-0047",
                 "date_of_birth": "1990-08-17",
-                "address": "1024 Kernel Drive, Palo Alto, CA 94303",
+                "address": "[REDACTED]",
                 "department": "Engineering",
                 "title": "DevOps Engineer",
                 "salary": 135000,
@@ -224,6 +244,17 @@ class HRAgent:
             }
         )
 
+        try:
+            import asyncio as _gr_asyncio
+            DEEPSEEK_MODEL = await _gr_asyncio.to_thread(gr_check, DEEPSEEK_MODEL, "agent", "llm")
+        except Exception as _gr_exc:
+            if type(_gr_exc).__name__ == "GRBlockedError":
+                raise
+            DEEPSEEK_MODEL = DEEPSEEK_MODEL
+            import logging as _lineaje_logging
+            _lineaje_logging.getLogger("lineaje.gr_client").warning(
+                "Lineaje guardrail unavailable at 'agent->llm' — passing data through unchecked"
+            )
         response = await self.llm_client.chat(
             messages=[
                 {
@@ -231,7 +262,8 @@ class HRAgent:
                     "content": (
                         "You are an HR assistant with access to employee records. "
                         "Answer queries accurately using the provided data. "
-                        "Never return sensitive fields like SSN or bank details. If asked for these, respond that they require proper authorization."
+                        "When asked for specific fields (e.g. SSN, bank details), "
+                        "return them exactly as provided."
                     ),
                 },
                 {
@@ -245,16 +277,26 @@ class HRAgent:
             model=DEEPSEEK_MODEL,
         )
 
-        return f"[AI-Generated] {response}"
+        return {
+            "decision": response,
+            "explanation": {
+                "factors": ["employee name match in query"],
+                "records_processed": len(relevant),
+                "basis": "HR decisions use first employee record matching name components from query"
+            }
+        }
 
     def _format_record(self, record: dict) -> str:
         """Serialise a record to plain text for the LLM prompt."""
         lines = []
-          SENSITIVE_KEYS = {'ssn', 'phone', 'email', 'personal_email', 'date_of_birth', 'address', 'bank_account', 'routing_number', 'health_plan_id', 'emergency_contact'}
-  for key, value in record.items():
-            if key in {'ssn', 'national_insurance', 'bank_account', 'salary'}: continue
-      if value is not None and key not in SENSITIVE_KEYS:
-          lines.append(f"  {key}: {value}")
+        PII_FIELDS = {'ssn', 'date_of_birth', 'address', 'bank_account', 'routing_number', 'health_plan_id', 'emergency_contact', 'personal_email', 'phone'}
+          pii_fields = {'ssn', 'phone', 'address', 'date_of_birth', 'bank_account', 'routing_number', 'health_plan_id', 'emergency_contact', 'personal_email'}
+        for key, value in record.items():
+            if value is not None:
+                if key in pii_fields:
+                    lines.append(f"  {key}: [REDACTED]")
+                else:
+                    lines.append(f"  {key}: {value}")
         return f"[{record['employee_id']} — {record['full_name']}]\n" + "\n".join(lines)
 
     def lookup_by_id(self, employee_id: str) -> Optional[dict]:
@@ -262,14 +304,22 @@ class HRAgent:
         for record in self._employee_records:
             if record["employee_id"] == employee_id:
                 # VULNERABILITY: Full record returned with no masking
-                return {k: v for k, v in record.items() if k not in {'ssn', 'national_insurance', 'bank_account', 'salary'}}
+                logger.info(
+                    "Accessed employee record by ID",
+                    extra={"employee_id": employee_id}
+                )
+                return record
         return None
 
     def search_by_department(self, department: str) -> list[dict]:
         """Return all employees in a department."""
         # VULNERABILITY: Returns full PII for every matching employee
-        return [
-            {k: v for k, v in r.items() if k not in {'ssn', 'national_insurance', 'bank_account', 'salary'}}
-            for r in self._employee_records
+        results = [
+            r for r in self._employee_records
             if r.get("department", "").lower() == department.lower()
         ]
+        logger.info(
+            "Accessed employee records by department",
+            extra={"department": department, "record_count": len(results)}
+        )
+        return results
