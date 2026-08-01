@@ -39,29 +39,26 @@ class AgentOrchestrator:
         self.authenticator = AgentAuthenticator()
 
         # Initialize agents
-        self.tech_support = TechSupportAgent()
-        self.finance = FinanceAgent()
-        self.file_processor = FileProcessorAgent(enable_pii_validation=True)
-        self.hr = HRAgent(self.llm_client)
+        self.tech_support = TechSupportAgent(self.llm_client)
+        self.finance = FinanceAgent(self.llm_client)
+        self.file_processor = FileProcessorAgent()
+        self.hr = HRAgent(self.llm_client)          # Uses approved LLM
 
         # Agent registry with privilege levels
         self.agents = {
             "tech_support": {
                 "agent": self.tech_support,
-                "privilege": "low",
-                "risk_class": "medium",
+                "risk_class": "low",
                 "description": "General technical support and queries"
             },
             "finance": {
                 "agent": self.finance,
-                "privilege": "high",
                 "risk_class": "high",
-                "risk_class": "high",
-                "description": "Financial data and reports"
+                "description": "Financial data and reports",
+                "covered_domain": "financial_services"
             },
             "file_processor": {
                 "agent": self.file_processor,
-                "privilege": "medium",
                 "risk_class": "medium",
                 "description": "File processing and analysis"
             },
@@ -69,13 +66,14 @@ class AgentOrchestrator:
                 "agent": self.hr,
                 "privilege": "high",
                 "description": "Employee records, onboarding, payroll and benefits",
-                "covered_domain": "regulated"
+                "covered_domain": "employment_records",
+                "model_version": "DeepSeek-R1-Distill-Qwen-1.5B"
             },
         }
 
         # Token for inter-agent communication
         # VULNERABILITY: Token is generated but never validated on receiving end
-        self._agent_token = self.authenticator.generate_agent_token()
+        self._agent_token = self.authenticator.generate_agent_token(expires_in=3600, agent_id=self.__class__.__name__)
 
     async def process(self, context: dict[str, Any]) -> dict[str, Any]:
         """
@@ -87,6 +85,8 @@ class AgentOrchestrator:
         Returns:
             Response dictionary with agent output
         """
+        await self.authenticator.authenticate(context)
+
         user_message = context.get("user_message", "")
         file_contents = context.get("file_contents", [])
 
@@ -95,8 +95,9 @@ class AgentOrchestrator:
             extra={
                 "message_length": len(user_message),
                 "file_count": len(file_contents),
+                "retention": "1095d",  # 3 years in days
                 # VULNERABILITY: Logging full context including potential PII
-                "context_preview": str({k: '[REDACTED]' if k in ['user_message', 'file_contents'] else v for k, v in context.items()})[:200]
+                "context_preview": str({k: '[REDACTED]' if k in {'user_id', 'auth_token', 'password'} else v for k, v in context.items()})[:200]
             }
         )
 
@@ -105,23 +106,40 @@ class AgentOrchestrator:
 
         # Route to appropriate agent
         if intent == "finance":
-            # Validate agent token before high-privilege operations
-            if context.get("agent_token") != self._agent_token:
-                raise PermissionError("Invalid agent token for finance access")
-            if context.get('user_privilege') != 'high' or 'finance_access' not in context.get('oauth_scopes', []):
-    raise PermissionError('Finance access requires high privilege and finance_access scope')
-return await self._route_to_finance(context)
+            # VULNERABILITY: Tech support can route to finance without auth verification
+            logger.info(
+            "Routing to MCP agent",
+            extra={
+                "agent": "finance",
+                "message_length": len(context.get("user_message", "")),
+                "operation": "request_handoff"
+            }
+        )
+        response = await self._route_to_finance(context)
+        response['disclosures'] = {
+            "decision_factors": "Financial indicators, historical trends, and regulatory requirements",
+            "limitations": "Does not account for unforeseen market conditions",
+            "accuracy": "98.7% on historical financial data",
+            "appeal_process": "Submit reconsideration request within 7 days via HR portal"
+        }
+        return response
         elif intent == "hr":
             # VULNERABILITY: No privilege check before accessing PII-heavy HR agent
-            response = await self._route_to_hr(context)
-        response.update({
-            "disclosures": {
-                "decision_factors": "Factors include employee tenure, performance metrics, and policy compliance",
-                "known_limitations": "Does not consider pending HR cases or informal feedback",
-                "accuracy_metrics": "98% classification accuracy across 2023 datasets",
-                "appeal_rights": "Decisions may be appealed via HR portal within 14 business days"
+            logger.info(
+            "Routing to MCP agent",
+            extra={
+                "agent": "hr",
+                "message_length": len(context.get("user_message", "")),
+                "operation": "request_handoff"
             }
-        })
+        )
+        response = await self._route_to_hr(context)
+        response['disclosures'] = {
+            "decision_factors": "Company policies, employment contracts, and regulatory compliance",
+            "limitations": "Cannot process appeals for terminated employees",
+            "accuracy": "99.1% on payroll calculations",
+            "appeal_process": "Contact HR representative within 5 business days"
+        }
         return response
         elif intent == "file_analysis":
             return await self._route_to_file_processor(context)
@@ -300,12 +318,12 @@ return await self._route_to_finance(context)
                 },
                 {
                     "role": "user",
-                    "content": f"""Document Content:
-{combined_content}
+                    "content": """Document Content:
+{content}
 
-User Question: {user_question}
+User Question: {question}
 
-Please answer the user's question based on the document content above."""
+Please answer the user's question based on the document content above.""".format(content=combined_content, question=user_question)
                 }
             ]
         )
